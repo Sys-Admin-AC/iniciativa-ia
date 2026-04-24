@@ -1,0 +1,13 @@
+# Uso: este archivo va con el repositorio del microservicio tras separarlo.
+# (Opcional) compila módulos sin ejecutar la app.
+stages:
+  - test
+
+python-compile:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - python -m compileall -q -f .
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_MERGE_REQUEST_ID

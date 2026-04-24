@@ -1,93 +1,120 @@
-# iniciativa-ia
+# API de análisis de iniciativas (Iniciativa AI)
 
+Microservicio **FastAPI** con PostgreSQL (historial y conversaciones) y Qdrant (vectores). Está diseñado para desplegarse **por separado** de la aplicación Yii2 *Talento humano*; la web solo hace de proxy hacia este servicio e inyecta el usuario con el encabezado `X-User-Id`.
 
+## Contenido
 
-## Getting started
+1. [Estructura del código](#estructura-del-código)
+2. [Inicio rápido (Docker)](#inicio-rápido-docker)
+3. [Variables de entorno](#variables-de-entorno)
+4. [Desarrollo sin Docker](#desarrollo-sin-docker)
+5. [Integración con el front Yii](#integración-con-el-front-yii)
+6. [API y documentación interactiva](#api-y-documentación-interactiva)
+7. [Migración a un repositorio Git nuevo](#migración-a-un-repositorio-git-nuevo)
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Estructura del código
 
-## Add your files
+El paquete principal es **`app/`**. La raíz expone `main.py` como envoltorio para que sigan valiendo `uvicorn main:app` y el `Dockerfile` actual.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+| Ruta | Rol |
+|------|-----|
+| `main.py` | Reexporta `app` desde `app.main` (compatibilidad con uvicorn/Docker). |
+| `app/main.py` | Instancia FastAPI, CORS, evento de arranque, registro de routers. |
+| `app/api/routers/` | Rutas HTTP (`health`, `conversations`, `history`). |
+| `app/api/deps.py` | Dependencias compartidas (`X-User-Id`, propiedad de conversación, fechas). |
+| `app/schemas/` | Modelos Pydantic de entrada/salida de la API. |
+| `app/db.py` | SQLAlchemy: modelos, sesión, `init_db`. |
+| `app/agent_logic.py` | Llamadas a LLM, RAG y herramientas de formulario. |
+| `app/qdrant_client_setup.py` | Cliente y colecciones Qdrant. |
 
+También puedes arrancar con `uvicorn app.main:app` si prefieres referenciar el módulo explícitamente.
+
+## Inicio rápido (Docker)
+
+```bash
+cd ai-backend
+cp .env.example .env
+# Editar .env: OPENAI_API_KEY obligatorio
+docker compose up -d
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/aldea-group/iniciativa-ia.git
-git branch -M main
-git push -uf origin main
+
+- API en el host: `http://localhost:8008` (puedes cambiar el puerto con `API_PORT` en `.env`).
+
+## Variables de entorno
+
+| Variable | Descripción |
+|----------|-------------|
+| `POSTGRES_URL` | Cadena SQLAlchemy, p. ej. `postgresql://user:pass@host:5432/th_ai` |
+| `QDRANT_URL` | Base URL de Qdrant, p. ej. `http://qdrant:6333` |
+| `OPENAI_API_KEY` | Clave de OpenAI |
+
+Detalle adicional en `.env.example`.
+
+## Desarrollo sin Docker
+
+```bash
+python -m venv .venv
+. .venv/Scripts/activate  # Windows; en Unix: source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Integrate with your tools
+## Integración con el front Yii
 
-* [Set up project integrations](https://gitlab.com/aldea-group/iniciativa-ia/-/settings/integrations)
+En el servidor o en Docker donde corre PHP:
 
-## Collaborate with your team
+- `AI_BACKEND_INTERNAL_URL` = URL **interna** con la que PHP puede alcanzar este API, por ejemplo:
+  - Misma máquina, PHP en contenedor: `http://host.docker.internal:8008` (puerto mapeado por defecto de este `docker compose`).
+  - Misma red Docker: `http://<nombre-servicio-api>:8000`.
+  - Producción: URL interna o del balanceador hacia el microservicio.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+No es necesario que el navegador abra el API: el módulo Iniciativa usa un proxy en Yii; el `user_id` **no** debe confiar en el cliente, solo en el encabezado que añade el proxy.
 
-## Test and Deploy
+## API y documentación interactiva
 
-Use the built-in continuous integration in GitLab.
+Con el servicio en marcha, FastAPI expone:
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- **Swagger UI:** `GET /docs`
+- **ReDoc:** `GET /redoc`
 
-***
+### Endpoints (resumen)
 
-# Editing this README
+| Método | Ruta | Notas |
+|--------|------|--------|
+| `GET` | `/health` | Sin dependencia de BD |
+| `POST` | `/conversations`, `/analyze`, `/chat` | Lógica principal |
+| `GET` | `/history`, `/history/{id}` | Requieren `X-User-Id` (proxy Yii) |
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Para detalle de cuerpos de petición y respuestas, usa `/docs` o el código bajo `app/api/routers/` y `app/schemas/`.
 
-## Suggestions for a good README
+## Migración a un repositorio Git nuevo
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+1. **Copia limpia** (simple): copia todo el directorio de este servicio a una carpeta nueva, añade `README.md` y `docker-compose.yml` ya incluidos, y:
 
-## Name
-Choose a self-explaining name for your project.
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial: microservicio Iniciativa AI"
+   git remote add origin <url-nuevo-repositorio>
+   git push -u origin main
+   ```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+2. **Mantener historial** desde un monorepo: en el repositorio que contiene la carpeta `ai-backend/`, desde la raíz de ese monorepo:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+   ```bash
+   git subtree split -P ai-backend -b rama-solo-iniciativa-ai
+   ```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+   Luego clona o crea un repo vacío, y haz `git pull` de esa rama, o añade el remoto y fusiona. (Si renombraste la carpeta, ajusta `-P` al nombre real.)
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+3. Tras publicar el microservicio, en el repositorio de la app Yii elimina o deja de actualizar el código duplicado de `ai-backend` y ajusta solo `AI_BACKEND_INTERNAL_URL` y el despliegue.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+---
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### Cómo escalar esta documentación
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- **README:** propósito del servicio, cómo levantarlo y enlaces a detalle.
+- **Detalle largo** (runbooks, decisiones de arquitectura, ADRs): mejor en `docs/` con enlaces desde aquí cuando aparezcan.
+- **Contrato HTTP:** la fuente de verdad puede seguir siendo OpenAPI (`/openapi.json`); el resumen en tabla solo complementa.
