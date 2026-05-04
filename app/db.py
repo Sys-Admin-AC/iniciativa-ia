@@ -20,7 +20,7 @@ Base = declarative_base()
 
 
 class Conversation(Base):
-    __tablename__ = "conversaciones_iniciativas"
+    __tablename__ = "iniciativa_conversaciones"
 
     id = Column(String(36), primary_key=True)
     initiative_title = Column(String(255), index=True)
@@ -36,10 +36,10 @@ class Conversation(Base):
 
 
 class Message(Base):
-    __tablename__ = "mensajes_iniciativas"
+    __tablename__ = "iniciativa_mensajes"
 
     id = Column(Integer, primary_key=True)
-    conversation_id = Column(String(36), ForeignKey("conversaciones_iniciativas.id"))
+    conversation_id = Column(String(36), ForeignKey("iniciativa_conversaciones.id"))
     role = Column(String(50))  # "user" or "agent"
     content = Column(LONGTEXT)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -53,7 +53,7 @@ class InitiativeWorkflow(Base):
     id = Column(Integer, primary_key=True)
     conversation_id = Column(
         String(36),
-        ForeignKey("conversaciones_iniciativas.id"),
+        ForeignKey("iniciativa_conversaciones.id"),
         nullable=False,
         unique=True,
         index=True,
