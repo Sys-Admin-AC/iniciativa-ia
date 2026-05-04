@@ -1,23 +1,30 @@
-import logging
 import os
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, create_engine, text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-DATABASE_URL = os.getenv("POSTGRES_URL", "postgresql://ai_user:ai_password@postgres:5432/th_ai")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "mariadb+pymysql://ai_user:ai_password@host.docker.internal:3306/talento_humano",
+)
 
-engine = create_engine(DATABASE_URL)
+ENGINE_OPTIONS = {"pool_pre_ping": True}
+if DATABASE_URL.startswith(("mysql", "mariadb")):
+    ENGINE_OPTIONS["connect_args"] = {"connect_timeout": 5}
+
+engine = create_engine(DATABASE_URL, **ENGINE_OPTIONS)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
 class Conversation(Base):
-    __tablename__ = "conversations"
+    __tablename__ = "conversaciones_iniciativas"
 
-    id = Column(String, primary_key=True, index=True)  # Using UUID string for simplicity from frontend
-    initiative_title = Column(String, index=True)
-    form_data = Column(Text, nullable=True)  # Stores JSON of the full form state
+    id = Column(String(36), primary_key=True)
+    initiative_title = Column(String(255), index=True)
+    form_data = Column(LONGTEXT, nullable=True)  # Stores JSON of the full form state
     # Propietario en la app Yii (Yii user id). NULL = filas creadas antes de esta columna o sin rellenar.
     user_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -26,38 +33,19 @@ class Conversation(Base):
 
 
 class Message(Base):
-    __tablename__ = "messages"
+    __tablename__ = "mensajes_iniciativas"
 
-    id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(String, ForeignKey("conversations.id"))
-    role = Column(String)  # "user" or "agent"
-    content = Column(Text)
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(String(36), ForeignKey("conversaciones_iniciativas.id"))
+    role = Column(String(50))  # "user" or "agent"
+    content = Column(LONGTEXT)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")
 
 
-def _ensure_conversations_user_id_column() -> None:
-    """Añade user_id a tablas ya existentes (create_all no altera columnas)."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id INTEGER"
-                )
-            )
-            conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_conversations_user_id ON conversations (user_id)"
-                )
-            )
-    except Exception as e:
-        logging.warning("No se pudo asegurar columna user_id: %s", e)
-
-
 def init_db():
     Base.metadata.create_all(bind=engine)
-    _ensure_conversations_user_id_column()
 
 
 def get_db():

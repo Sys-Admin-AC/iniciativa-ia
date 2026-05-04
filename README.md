@@ -1,6 +1,6 @@
 # API de análisis de iniciativas (Iniciativa AI)
 
-Microservicio **FastAPI** con PostgreSQL (historial y conversaciones) y Qdrant (vectores). Está diseñado para desplegarse **por separado** de la aplicación Yii2 *Talento humano*; la web solo hace de proxy hacia este servicio e inyecta el usuario con el encabezado `X-User-Id`.
+Microservicio **FastAPI** con MariaDB externo (historial y conversaciones) y Qdrant (vectores). Está diseñado para desplegarse **por separado** de la aplicación Yii2 *Talento humano*; la web solo hace de proxy hacia este servicio e inyecta el usuario con el encabezado `X-User-Id`.
 
 ## Contenido
 
@@ -36,7 +36,7 @@ También puedes arrancar con `uvicorn app.main:app` si prefieres referenciar el 
 ```bash
 cd ai-backend
 cp .env.example .env
-# Editar .env: OPENAI_API_KEY obligatorio
+# Editar .env: OPENAI_API_KEY y DATABASE_URL obligatorios
 docker compose up -d
 ```
 
@@ -46,7 +46,7 @@ docker compose up -d
 
 | Variable | Descripción |
 |----------|-------------|
-| `POSTGRES_URL` | Cadena SQLAlchemy, p. ej. `postgresql://user:pass@host:5432/th_ai` |
+| `DATABASE_URL` | Cadena SQLAlchemy para MariaDB, p. ej. `mariadb+pymysql://user:pass@host.docker.internal:3306/talento_humano` |
 | `QDRANT_URL` | Base URL de Qdrant, p. ej. `http://qdrant:6333` |
 | `OPENAI_API_KEY` | Clave de OpenAI |
 

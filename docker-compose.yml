@@ -1,26 +1,10 @@
-# Stack completo del microservicio (API + Postgres + Qdrant).
+# Stack del microservicio (API + Qdrant). La base MariaDB vive fuera de Docker.
 # Uso: desde este directorio, `docker compose up -d` y exponer 8000 (o el mapeo que definas).
 #
 # La app Yii (otro repositorio) llama a este API solo a través de su proxy, usando en el contenedor
 # PHP la variable de entorno AI_BACKEND_INTERNAL_URL (p. ej. http://host.docker.internal:8008).
 
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-ai_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_password}
-      POSTGRES_DB: ${POSTGRES_DB:-th_ai}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai_user} -d ${POSTGRES_DB:-th_ai}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   qdrant:
     image: qdrant/qdrant:latest
     ports:
@@ -35,7 +19,7 @@ services:
       # Host 8008 por defecto = mismo puerto que aiBackend en config/params.php
       - "${API_PORT:-8008}:8000"
     environment:
-      POSTGRES_URL: postgresql://${POSTGRES_USER:-ai_user}:${POSTGRES_PASSWORD:-ai_password}@postgres:5432/${POSTGRES_DB:-th_ai}
+      DATABASE_URL: ${DATABASE_URL:-mariadb+pymysql://root:root@host.docker.internal:3306/talento_humano}
       QDRANT_URL: http://qdrant:6333
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     command:
@@ -49,11 +33,8 @@ services:
     volumes:
       - .:/app
     depends_on:
-      postgres:
-        condition: service_healthy
       qdrant:
         condition: service_started
 
 volumes:
-  postgres_data:
   qdrant_data:
