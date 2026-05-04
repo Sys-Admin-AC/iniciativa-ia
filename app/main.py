@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db, qdrant_client_setup
-from app.api.routers import conversations, health, history
+from app.api.routers import conversations, health, history, workflow
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,3 +28,4 @@ def on_startup():
 app.include_router(health.router)
 app.include_router(conversations.router)
 app.include_router(history.router)
+app.include_router(workflow.router)

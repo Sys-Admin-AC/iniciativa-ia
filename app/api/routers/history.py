@@ -1,11 +1,17 @@
 import json
+from typing import Set
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app import db
-from app.api.deps import _ensure_conversation_owner, _iso, _require_user_id
+from app.api.deps import (
+    _ensure_conversation_read_access,
+    _get_rbac_roles,
+    _iso,
+    _require_user_id,
+)
 
 router = APIRouter(tags=["history"])
 
@@ -50,6 +56,7 @@ def get_conversation_detail(
     conversation_id: str,
     session: Session = Depends(db.get_db),
     user_id: int = Depends(_require_user_id),
+    roles: Set[str] = Depends(_get_rbac_roles),
 ):
     conv = (
         session.query(db.Conversation)
@@ -58,7 +65,7 @@ def get_conversation_detail(
     )
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    _ensure_conversation_owner(conv, user_id)
+    _ensure_conversation_read_access(conv, user_id, roles)
     session.commit()
 
     messages = (

@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, create_engine
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -30,6 +30,9 @@ class Conversation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     messages = relationship("Message", back_populates="conversation")
+    workflow = relationship(
+        "InitiativeWorkflow", back_populates="conversation", uselist=False
+    )
 
 
 class Message(Base):
@@ -42,6 +45,75 @@ class Message(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class InitiativeWorkflow(Base):
+    __tablename__ = "iniciativa_workflows"
+
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(
+        String(36),
+        ForeignKey("conversaciones_iniciativas.id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    current_status = Column(String(80), nullable=False, index=True)
+    created_by_user_id = Column(Integer, nullable=False, index=True)
+    updated_by_user_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="workflow")
+    events = relationship(
+        "InitiativeTimelineEvent",
+        back_populates="workflow",
+        order_by="InitiativeTimelineEvent.created_at",
+    )
+    technical_evaluations = relationship(
+        "InitiativeTechnicalEvaluation",
+        back_populates="workflow",
+        order_by="InitiativeTechnicalEvaluation.created_at",
+    )
+
+
+class InitiativeTimelineEvent(Base):
+    __tablename__ = "iniciativa_timeline_events"
+
+    id = Column(Integer, primary_key=True)
+    workflow_id = Column(Integer, ForeignKey("iniciativa_workflows.id"), nullable=False)
+    conversation_id = Column(String(36), nullable=False, index=True)
+    event_type = Column(String(80), nullable=False, index=True)
+    from_status = Column(String(80), nullable=True)
+    to_status = Column(String(80), nullable=False, index=True)
+    actor_user_id = Column(Integer, nullable=False, index=True)
+    actor_role = Column(String(80), nullable=True, index=True)
+    actor_name = Column(String(255), nullable=True)
+    comment = Column(LONGTEXT, nullable=True)
+    payload = Column(LONGTEXT, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    workflow = relationship("InitiativeWorkflow", back_populates="events")
+
+
+class InitiativeTechnicalEvaluation(Base):
+    __tablename__ = "iniciativa_evaluaciones_ti"
+
+    id = Column(Integer, primary_key=True)
+    workflow_id = Column(Integer, ForeignKey("iniciativa_workflows.id"), nullable=False)
+    conversation_id = Column(String(36), nullable=False, index=True)
+    evaluator_user_id = Column(Integer, nullable=False, index=True)
+    evaluator_name = Column(String(255), nullable=True)
+    rubric = Column(LONGTEXT, nullable=False)
+    total_score = Column(Integer, nullable=False)
+    average_score = Column(Float, nullable=False)
+    complexity = Column(String(40), nullable=False, index=True)
+    comment = Column(LONGTEXT, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    workflow = relationship(
+        "InitiativeWorkflow", back_populates="technical_evaluations"
+    )
 
 
 def init_db():
