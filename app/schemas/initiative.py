@@ -21,7 +21,7 @@ class InitiativeInput(BaseModel):
     validacion_exito: str
     kpis: List[KpiInput]
     beneficio_esperado: str
-    valor_estimado: Optional[float] = None
+    valor_estimado: Optional[str] = None
     # Si viene seteado, se actualiza esa conversación en lugar de crear otra (evita duplicados en el historial).
     conversation_id: Optional[str] = None
 
@@ -30,13 +30,12 @@ class InitiativeInput(BaseModel):
     def normalize_valor_estimado(cls, value):
         if value is None:
             return None
-        if isinstance(value, str):
-            clean = value.strip()
-            if not clean:
-                return None
-            clean = clean.replace("$", "").replace(",", "")
-            return float(clean)
-        return value
+        if isinstance(value, (int, float)):
+            return str(value)
+        clean = str(value).strip()
+        if not clean:
+            return None
+        return clean
 
 
 class ChatInput(BaseModel):
