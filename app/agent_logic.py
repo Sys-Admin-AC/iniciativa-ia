@@ -221,6 +221,55 @@ _GUIDED_IDEA_PROMPT = (
     "¿qué problema u oportunidad quieres resolver?"
 )
 
+_GENERIC_USER_CONFIRMATION_PHRASES = {
+    "si",
+    "sí",
+    "ok",
+    "oki",
+    "dale",
+    "de acuerdo",
+    "correcto",
+    "claro",
+    "perfecto",
+    "continuemos",
+    "adelante",
+    "esta bien",
+    "está bien",
+    "estan bien",
+    "están bien",
+    "asi esta bien",
+    "así está bien",
+    "si esta bien",
+    "sí está bien",
+    "si asi me parece",
+    "si así me parece",
+    "me parece bien",
+    "me parece excelente",
+    "me gusta",
+    "lo dejamos así",
+    "lo dejamos asi",
+    "dejemoslo asi",
+    "dejémoslo así",
+    "sigamos",
+    "continua",
+    "continúa",
+    "listo",
+}
+
+
+def _normalize_text_for_match(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    normalized = normalized.replace("¡", "").replace("!", "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = (
+        normalized.replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+    )
+    return normalized
+
 
 def _is_empty_field(key: str, value: Any) -> bool:
     if value is None:
@@ -276,31 +325,47 @@ def _is_affirmative_message(message: str) -> bool:
     normalized = (message or "").strip().lower()
     if not normalized:
         return False
-    normalized = normalized.replace("¡", "").replace("!", "")
-    exact = {
-        "si",
-        "sí",
-        "ok",
-        "oki",
-        "dale",
-        "de acuerdo",
-        "correcto",
-        "claro",
-        "perfecto",
-        "continuemos",
-    }
-    if normalized in exact:
+    normalized_simple = _normalize_text_for_match(normalized)
+    if normalized in _GENERIC_USER_CONFIRMATION_PHRASES or normalized_simple in _GENERIC_USER_CONFIRMATION_PHRASES:
         return True
     fragments = (
         "me parece bien",
         "me parece excelente",
+        "me gusta",
         "lo dejamos así",
         "lo dejamos asi",
         "sigamos",
         "continua",
         "continúa",
+        "esta bien",
+        "está bien",
+        "estan bien",
+        "están bien",
+        "asi me parece",
+        "así me parece",
     )
-    return any(frag in normalized for frag in fragments)
+    if any(frag in normalized for frag in fragments):
+        return True
+    tokens = set(normalized_simple.split())
+    if "dejemoslo" in tokens and "asi" in tokens:
+        return True
+    if "es" in tokens and ("correcta" in tokens or "correcto" in tokens):
+        return True
+    if "bien" in tokens and ("si" in tokens or "asi" in tokens):
+        return True
+    return False
+
+
+def _is_generic_update_reply(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    norm = _normalize_text_for_match(raw)
+    return (
+        "he actualizado el formulario" in norm
+        or "formulario actualizado" in norm
+        or norm in _GENERIC_ASSISTANT_REPLIES
+    )
 
 
 def _extract_text_between_quotes(text: str) -> str:
@@ -567,7 +632,12 @@ def _extract_user_value_for_target(field_name: str, message: str) -> Optional[st
     raw = (message or "").strip()
     if not raw:
         return None
-    if _is_affirmative_message(raw):
+    normalized_raw = _normalize_text_for_match(raw)
+    if (
+        _is_affirmative_message(raw)
+        or normalized_raw in _GENERIC_USER_CONFIRMATION_PHRASES
+        or len(normalized_raw) <= 18 and normalized_raw in _GENERIC_USER_CONFIRMATION_PHRASES
+    ):
         return None
     if field_name == "valor_estimado":
         return raw
@@ -585,6 +655,40 @@ def _extract_user_value_for_target(field_name: str, message: str) -> Optional[st
                 db = "Oracle"
             return f"Base de datos relacional en {db}."
     return raw
+
+
+def _is_generic_confirmation_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    norm = _normalize_text_for_match(text)
+    if norm in _GENERIC_USER_CONFIRMATION_PHRASES:
+        return True
+    tokens = set(norm.split())
+    if "dejemoslo" in tokens and "asi" in tokens:
+        return True
+    if "es" in tokens and ("correcta" in tokens or "correcto" in tokens):
+        return True
+    if len(norm) <= 24 and ("ok" in tokens or "bien" in tokens or "perfecto" in tokens):
+        return True
+    return False
+
+
+def _infer_datos_ubicacion_from_message(message: str) -> Optional[str]:
+    low = (message or "").strip().lower()
+    if not low:
+        return None
+    if any(k in low for k in ("mariadb", "mysql", "postgres", "postgresql", "oracle", "sql", "base de datos", "db sql")):
+        if "mariadb" in low:
+            return "Base de datos relacional en MariaDB."
+        if "mysql" in low:
+            return "Base de datos relacional en MySQL."
+        if "postgresql" in low or "postgres" in low:
+            return "Base de datos relacional en PostgreSQL."
+        if "oracle" in low:
+            return "Base de datos relacional en Oracle."
+        return "Base de datos relacional SQL del sistema transaccional."
+    return None
 
 
 def _is_generic_guided_placeholder(body: str, target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]]) -> bool:
@@ -758,7 +862,7 @@ def _append_guided_followup(
         low = ""
     if not body:
         return line
-    if low in _GENERIC_ASSISTANT_REPLIES:
+    if _is_generic_update_reply(body):
         if nxt is None:
             return _guided_question(None)
         return f"Listo, avanzamos. {line}"
@@ -892,6 +996,23 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             }
         )
 
+    # Sanitiza tool calls: evita guardar confirmaciones genéricas como valor de campos.
+    for update in form_updates:
+        if update.get("function") != "UpdateFormField":
+            continue
+        args = update.get("args") or {}
+        field_name = args.get("field_name")
+        if not field_name:
+            continue
+        value = args.get("value")
+        if not _is_generic_confirmation_value(value):
+            continue
+        inferred = _proposal_from_last_assistant(history, ("scalar", str(field_name)))
+        if not inferred:
+            inferred = _default_value_for_scalar_target(("scalar", str(field_name)), merged_before)
+        if inferred:
+            args["value"] = inferred
+
     # Fallback defensivo: si el usuario confirma una propuesta en modo guiado y el LLM
     # no ejecutó tool call, inferimos el guardado del campo sugerido para no romper el flujo.
     if guided_mode and not form_updates and target_before and target_before[0] == "scalar":
@@ -919,6 +1040,26 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
                         "args": {
                             "field_name": field_name,
                             "value": explicit_value,
+                        },
+                    }
+                )
+    # Si el usuario menciona explícitamente el origen SQL/BD, guarda también ubicación de datos
+    # aunque el modelo no lo haya hecho en este turno.
+    if guided_mode:
+        has_location_update = any(
+            u.get("function") == "UpdateFormField"
+            and (u.get("args") or {}).get("field_name") == "datos_ubicacion"
+            for u in form_updates
+        )
+        if not has_location_update and _is_empty_field("datos_ubicacion", merged_before.get("datos_ubicacion")):
+            inferred_location = _infer_datos_ubicacion_from_message(message)
+            if inferred_location:
+                form_updates.append(
+                    {
+                        "function": "UpdateFormField",
+                        "args": {
+                            "field_name": "datos_ubicacion",
+                            "value": inferred_location,
                         },
                     }
                 )
@@ -1000,6 +1141,13 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             if form_updates
             else ""
         )
+    # Capa final de seguridad: evita respuestas genéricas cuando aún faltan campos/KPIs.
+    if guided_mode and _is_generic_update_reply(content_out):
+        merged_after = _apply_form_updates(current_form, form_updates)
+        nxt_after = _next_guided_target(merged_after)
+        if nxt_after is not None:
+            forced = _guided_specific_proposal(nxt_after, merged_after) or _guided_question(nxt_after)
+            content_out = f"Listo, avanzamos. {forced}"
 
     return {
         "content": content_out,
