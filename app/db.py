@@ -7,7 +7,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mariadb+pymysql://ai_user:ai_password@host.docker.internal:3306/talento_humano",
+    "mariadb+pymysql://root:root@192.168.1.112:3306/talento_humano",
 )
 
 ENGINE_OPTIONS = {"pool_pre_ping": True}

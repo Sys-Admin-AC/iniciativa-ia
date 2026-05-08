@@ -45,6 +45,27 @@ EVENT_ANNULLED = "initiative_annulled"
 ROLE_COMMITTEE_MUTATION = frozenset({"iniciativa_comite"})
 ROLE_TI_MUTATION = frozenset({"ti"})
 ROLE_ADMIN_MUTATION = frozenset({"admin"})
+ROLE_OPERATIONS_COMMITTEE_MUTATION = frozenset(
+    {
+        "iniciativa_comite_operaciones",
+        "comite_operaciones",
+        "committee_operations",
+        "operaciones",
+    }
+)
+ROLE_MANAGEMENT_COMMITTEE_MUTATION = frozenset(
+    {
+        "iniciativa_comite_gerencial",
+        "comite_gerencial",
+        "committee_management",
+        "gerencial",
+    }
+)
+ROLE_ANY_COMMITTEE_MUTATION = (
+    ROLE_COMMITTEE_MUTATION
+    .union(ROLE_OPERATIONS_COMMITTEE_MUTATION)
+    .union(ROLE_MANAGEMENT_COMMITTEE_MUTATION)
+)
 
 LEGACY_STATUS_MAP = {
     "draft_analyzed": STATUS_DRAFT,
@@ -330,7 +351,9 @@ def list_workflows(
     user_id: int = Depends(_require_user_id),
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
-    if not owned_only and not roles.intersection({"ti", "iniciativa_comite", "admin"}):
+    if not owned_only and not roles.intersection(
+        {"ti", "admin"}.union(ROLE_ANY_COMMITTEE_MUTATION)
+    ):
         raise HTTPException(
             status_code=403,
             detail="No tienes acceso a la bandeja global de workflows.",
@@ -397,7 +420,11 @@ def request_technical_review(
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
     workflow = _get_workflow_for_mutation(
-        conversation_id, session, user_id, roles, ROLE_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION)
+        conversation_id,
+        session,
+        user_id,
+        roles,
+        ROLE_ANY_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION),
     )
     _assert_status(workflow, {STATUS_COMMITTEE_TI})
     _add_event(
@@ -464,7 +491,7 @@ def submit_technical_evaluation(
         session=session,
         workflow=workflow,
         event_type=EVENT_TECHNICAL_COMMENT_SUBMITTED,
-        to_status=STATUS_COMMITTEE_TI,
+        to_status=STATUS_COMMITTEE_OPERATIONS,
         actor_user_id=user_id,
         actor_role=data.actor_role,
         actor_name=data.evaluator_name,
@@ -488,11 +515,25 @@ def submit_committee_response(
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
     workflow = _get_workflow_for_mutation(
-        conversation_id, session, user_id, roles, ROLE_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION)
+        conversation_id,
+        session,
+        user_id,
+        roles,
+        ROLE_ANY_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION),
     )
     response_type = (data.response_type or "").strip() or "committee_comment"
     current = _normalized_status(workflow.current_status)
-    if response_type in {"committee_comment", "comment", "committee_initial_comment"}:
+    if response_type in {
+        "committee_comment",
+        "comment",
+        "committee_initial_comment",
+        "operations_committee_comment",
+        "committee_operations_comment",
+        "management_committee_comment",
+        "committee_management_comment",
+        "gerencial_committee_comment",
+        "committee_gerencial_comment",
+    }:
         _assert_status(
             workflow,
             {
@@ -552,7 +593,11 @@ def submit_to_final_committee(
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
     workflow = _get_workflow_for_mutation(
-        conversation_id, session, user_id, roles, ROLE_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION)
+        conversation_id,
+        session,
+        user_id,
+        roles,
+        ROLE_ANY_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION),
     )
     _assert_status(workflow, {STATUS_COMMITTEE_OPERATIONS})
     _add_event(
@@ -583,7 +628,11 @@ def reject_workflow(
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
     workflow = _get_workflow_for_mutation(
-        conversation_id, session, user_id, roles, ROLE_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION)
+        conversation_id,
+        session,
+        user_id,
+        roles,
+        ROLE_ANY_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION),
     )
     _assert_status(
         workflow,

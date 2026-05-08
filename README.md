@@ -72,9 +72,9 @@ En el servidor o en Docker donde corre PHP:
 
 No es necesario que el navegador abra el API: el módulo Iniciativa usa un proxy en Yii; el `user_id` **no** debe confiar en el cliente, solo en el encabezado que añade el proxy.
 
-Para lecturas de comité/TI, el proxy debe enviar `X-Th-Rbac-Roles` con roles separados por coma, pipe o espacios. Los endpoints `GET /history/{id}`, `GET /workflow/{id}` y `GET /workflow/{id}/timeline` permiten acceso si el usuario es dueño de la conversación o si el header contiene `TI`/`ti` o `iniciativa_comite`.
+Para lecturas de comité/TI, el proxy debe enviar `X-Th-Rbac-Roles` con roles separados por coma, pipe o espacios. Los endpoints `GET /history/{id}`, `GET /workflow/{id}` y `GET /workflow/{id}/timeline` permiten acceso si el usuario es dueño de la conversación o si el header contiene `TI`/`ti`, `iniciativa_comite`, `iniciativa_comite_operaciones`, `comite_operaciones`, `iniciativa_comite_gerencial`, `comite_gerencial` o `admin`.
 
-Las mutaciones de comité (`POST .../request-technical-review`, `POST .../committee-responses`, `POST .../submit-final-committee`) usan la misma regla: dueño **o** rol `iniciativa_comite` en `X-Th-Rbac-Roles`. La evaluación TI (`POST .../technical-evaluations`) permite dueño **o** rol `ti`/`TI` en ese header. `POST .../submit-committee` sigue siendo solo para el dueño (envío a comité inicial).
+Las mutaciones de comité (`POST .../request-technical-review`, `POST .../committee-responses`, `POST .../submit-final-committee`) usan la misma regla: dueño o rol de comité en `X-Th-Rbac-Roles`. La evaluación TI (`POST .../technical-evaluations`) permite dueño o rol `ti`/`TI` en ese header. `POST .../submit-committee` sigue siendo solo para el dueño (envío a comité inicial).
 
 ## API y documentación interactiva
 
@@ -113,11 +113,11 @@ Estados usados por el API:
 - `user_reviewed`: otro usuario/comité respondió la iniciativa.
 - `final_committee`: enviada a comité final.
 
-La evaluación técnica se registra con una rúbrica de criterios puntuados de 1 a 5. El API calcula `total_score`, `average_score` y `complexity` (`baja`, `media`, `alta`) y también escribe un evento en `/workflow/{id}/timeline`.
+La evaluación técnica se registra con una rúbrica de criterios puntuados de 1 a 5. El API calcula `total_score`, `average_score` y `complexity` (`baja`, `media`, `alta`), escribe un evento en `/workflow/{id}/timeline` y pasa automáticamente la iniciativa a `committee_operations_review`.
 
 Para la bandeja de comité, usa `GET /workflow`. Por defecto devuelve iniciativas en `committee_review` del usuario actual. Si Yii ya validó que el usuario puede ver la bandeja global, debe enviar `X-Th-Rbac-Roles: iniciativa_comite` o `X-Th-Rbac-Roles: TI` y llamar `GET /workflow?owned_only=false`. Para incluir varios estados, envía el parámetro repetido, por ejemplo `GET /workflow?owned_only=false&statuses=committee_review&statuses=committee_with_technical_feedback`.
 
-`POST /workflow/{id}/committee-responses` acepta `response_type: "committee_initial_comment"` para registrar una nota del comité inicial en el timeline sin cambiar el estado `committee_review`. Otros `response_type` continúan avanzando el workflow a `user_reviewed`.
+`POST /workflow/{id}/committee-responses` acepta comentarios sin transición para comité inicial, operaciones y gerencial. Usa `response_type: "committee_initial_comment"`, `response_type: "operations_committee_comment"` o `response_type: "management_committee_comment"` para registrar la nota en el timeline conservando el estado actual.
 
 Ejemplo mínimo para evaluación TI:
 

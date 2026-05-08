@@ -53,7 +53,19 @@ def _ensure_conversation_read_access(
     allowed_roles: Optional[Set[str]] = None,
 ) -> None:
     """Permite lectura al dueño o a roles autorizados por el proxy Yii."""
-    allowed_roles = allowed_roles or {"ti", "iniciativa_comite", "admin"}
+    allowed_roles = allowed_roles or {
+        "ti",
+        "iniciativa_comite",
+        "iniciativa_comite_operaciones",
+        "comite_operaciones",
+        "committee_operations",
+        "operaciones",
+        "iniciativa_comite_gerencial",
+        "comite_gerencial",
+        "committee_management",
+        "gerencial",
+        "admin",
+    }
     if conv.user_id is None:
         conv.user_id = user_id
         return

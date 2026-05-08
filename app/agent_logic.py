@@ -47,6 +47,12 @@ Por favor, realiza un análisis crítico, objetivo y estructurado de esta inicia
    - Ajustes recomendados para mejorar la alineación.
 
 Presenta tus resultados en formato Markdown, de forma analítica y colaborativa.
+Reglas de formato para legibilidad:
+- No uses encabezados H1 (`#`).
+- Inicia con `## Análisis crítico de la iniciativa`.
+- En la siguiente línea coloca `**Iniciativa:** {titulo}`.
+- Usa encabezados `###` para las secciones principales.
+- Mantén títulos cortos y separa los párrafos con saltos de línea.
 """
 
 # Tool schemas for structured updates
@@ -96,6 +102,33 @@ def get_strategic_context(query: str, limit: int = 5) -> str:
     except Exception as e:
         print(f"Error searching RAG: {e}")
         return ""
+
+
+def _normalize_analysis_markdown(text: str, title: Optional[str]) -> str:
+    """Evita H1 enormes y separa títulos largos para mejorar lectura en el front."""
+    body = (text or "").strip()
+    if not body:
+        return body
+
+    clean_title = (title or "Sin título").strip() or "Sin título"
+    body = re.sub(r"(?m)^#\s+", "## ", body)
+
+    header_pattern = r"(?im)^\s*##\s+Análisis crítico de la iniciativa:?.*$"
+    initiative_pattern = r"(?im)^\s*(?:\*\*)?Iniciativa:(?:\*\*)?\s*(.+?)\s*$"
+
+    initiative_match = re.search(initiative_pattern, body[:500])
+    initiative_title = (
+        initiative_match.group(1).strip().strip("*") if initiative_match else clean_title
+    )
+
+    body = re.sub(header_pattern, "", body, count=1).lstrip()
+    body = re.sub(initiative_pattern, "", body).lstrip()
+
+    return (
+        "## Análisis crítico de la iniciativa\n\n"
+        f"**Iniciativa:** {initiative_title}\n\n"
+        f"{body}"
+    ).strip()
 
 def analyze_initiative(data: dict) -> str:
     llm = get_llm()
@@ -150,7 +183,7 @@ def analyze_initiative(data: dict) -> str:
         "kpis_str": kpis_str,
         "strategic_context": strategic_context,
     })
-    return result['text']
+    return _normalize_analysis_markdown(result["text"], data.get("titulo"))
 
 def _normalize_tool_calls(response: Any) -> List[Dict[str, Any]]:
     """Compatibilidad entre versiones de LangChain / formatos de tool_calls (dict u objetos)."""
