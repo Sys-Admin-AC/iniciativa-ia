@@ -73,4 +73,6 @@ class WorkflowListItemResponse(BaseModel):
     workflow_created_at: Optional[str]
     workflow_updated_at: Optional[str]
     conversation_created_at: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
     form_data: Dict[str, Any]

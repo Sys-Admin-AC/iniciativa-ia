@@ -5,6 +5,8 @@ from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, cre
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
+from app.utils import get_now
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "mariadb+pymysql://root:root@192.168.1.112:3306/talento_humano",
@@ -27,7 +29,7 @@ class Conversation(Base):
     form_data = Column(LONGTEXT, nullable=True)  # Stores JSON of the full form state
     # Propietario en la app Yii (Yii user id). NULL = filas creadas antes de esta columna o sin rellenar.
     user_id = Column(Integer, nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_now)
 
     messages = relationship("Message", back_populates="conversation")
     workflow = relationship(
@@ -42,7 +44,7 @@ class Message(Base):
     conversation_id = Column(String(36), ForeignKey("iniciativa_conversaciones.id"))
     role = Column(String(50))  # "user" or "agent"
     content = Column(LONGTEXT)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_now)
 
     conversation = relationship("Conversation", back_populates="messages")
 
@@ -61,8 +63,8 @@ class InitiativeWorkflow(Base):
     current_status = Column(String(80), nullable=False, index=True)
     created_by_user_id = Column(Integer, nullable=False, index=True)
     updated_by_user_id = Column(Integer, nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=get_now)
+    updated_at = Column(DateTime, default=get_now, onupdate=get_now)
 
     conversation = relationship("Conversation", back_populates="workflow")
     events = relationship(
@@ -91,7 +93,7 @@ class InitiativeTimelineEvent(Base):
     actor_name = Column(String(255), nullable=True)
     comment = Column(LONGTEXT, nullable=True)
     payload = Column(LONGTEXT, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=get_now, index=True)
 
     workflow = relationship("InitiativeWorkflow", back_populates="events")
 
@@ -109,7 +111,7 @@ class InitiativeTechnicalEvaluation(Base):
     average_score = Column(Float, nullable=False)
     complexity = Column(String(40), nullable=False, index=True)
     comment = Column(LONGTEXT, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=get_now, index=True)
 
     workflow = relationship(
         "InitiativeWorkflow", back_populates="technical_evaluations"

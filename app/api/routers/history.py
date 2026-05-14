@@ -35,7 +35,11 @@ def get_history(
     rows = (
         session.query(db.Conversation, last_activity.label("last_at"))
         .outerjoin(subq, db.Conversation.id == subq.c.conversation_id)
+        .outerjoin(db.InitiativeWorkflow, db.Conversation.id == db.InitiativeWorkflow.conversation_id)
         .filter(db.Conversation.user_id == user_id)
+        .filter(
+            (db.InitiativeWorkflow.id == None) | (db.InitiativeWorkflow.current_status == "draft")
+        )
         .order_by(desc(last_activity))
         .all()
     )

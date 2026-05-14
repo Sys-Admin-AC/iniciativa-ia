@@ -3,6 +3,8 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
+from app.utils import get_now
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -59,6 +61,8 @@ def analyze(
         )
         if existing:
             _ensure_conversation_owner(existing, user_id)
+            if existing.workflow and existing.workflow.current_status != "draft":
+                raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
             existing.initiative_title = title
             existing.form_data = form_json
             session.commit()
@@ -71,7 +75,7 @@ def analyze(
             )
             if messages:
                 if messages[0].role == "user":
-                    first_ts = messages[0].created_at or datetime.utcnow()
+                    first_ts = messages[0].created_at or get_now()
                     session.add(
                         db.Message(
                             conversation_id=data.conversation_id,
@@ -136,6 +140,8 @@ def chat(
     session.add(user_msg)
 
     if data.current_form:
+        if conv.workflow and conv.workflow.current_status != "draft":
+             raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
         conv.form_data = json.dumps(data.current_form)
         if data.current_form.get("titulo"):
             conv.initiative_title = data.current_form.get("titulo")

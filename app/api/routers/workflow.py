@@ -2,6 +2,8 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.utils import get_now
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
@@ -240,7 +242,7 @@ def _add_event(
     previous_status = workflow.current_status
     workflow.current_status = to_status
     workflow.updated_by_user_id = actor_user_id
-    workflow.updated_at = datetime.utcnow()
+    workflow.updated_at = get_now()
 
     event = db.InitiativeTimelineEvent(
         workflow_id=workflow.id,
@@ -326,6 +328,8 @@ def _serialize_workflow_list_item(
         "workflow_created_at": _iso(workflow.created_at),
         "workflow_updated_at": _iso(workflow.updated_at),
         "conversation_created_at": _iso(conversation.created_at),
+        "created_at": _iso(workflow.created_at or conversation.created_at),
+        "updated_at": _iso(workflow.updated_at or workflow.created_at or conversation.created_at),
         "form_data": _json_loads(conversation.form_data, {}),
     }
 
