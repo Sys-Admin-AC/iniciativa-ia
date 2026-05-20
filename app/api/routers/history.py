@@ -105,3 +105,38 @@ def get_conversation_detail(
         "form_data": form_data,
         "created_at": _iso(conv.created_at),
     }
+
+
+@router.delete("/history/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    session: Session = Depends(db.get_db),
+    user_id: int = Depends(_require_user_id),
+):
+    conv = (
+        session.query(db.Conversation)
+        .filter(db.Conversation.id == conversation_id)
+        .first()
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conv.user_id is not None and conv.user_id != user_id:
+        raise HTTPException(status_code=403, detail="No tiene permiso para eliminar esta conversación")
+
+    if conv.workflow and conv.workflow.current_status != "draft":
+        raise HTTPException(status_code=400, detail="No se puede eliminar una iniciativa en revisión")
+
+    if conv.workflow:
+        session.query(db.InitiativeTechnicalEvaluation).filter(
+            db.InitiativeTechnicalEvaluation.workflow_id == conv.workflow.id
+        ).delete()
+        session.query(db.InitiativeTimelineEvent).filter(
+            db.InitiativeTimelineEvent.workflow_id == conv.workflow.id
+        ).delete()
+        session.delete(conv.workflow)
+
+    session.query(db.Message).filter(db.Message.conversation_id == conversation_id).delete()
+    session.delete(conv)
+    session.commit()
+    return {"status": "ok"}

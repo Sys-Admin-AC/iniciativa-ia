@@ -493,17 +493,23 @@ def _suggest_unit_from_form(merged: dict) -> str:
             str(merged.get("impacto_operacion") or ""),
         ]
     ).lower()
-    if any(k in blob for k in ("cliente", "atención", "soporte", "pqrs")):
-        return "Servicio al Cliente"
-    if any(k in blob for k in ("ventas", "comercial", "cotiz", "prospect")):
-        return "Comercial y Ventas"
-    if any(k in blob for k in ("finanza", "cost", "presupuesto", "gasto")):
-        return "Finanzas"
-    if any(k in blob for k in ("operación", "operacion", "proceso", "logística", "logistica")):
-        return "Operaciones"
-    if any(k in blob for k in ("talento", "rrhh", "reclutamiento", "personas")):
+    if any(k in blob for k in ("café", "cafe", "coffee", "taza", "barismo", "barista", "granos")):
+        return "Aldea Coffee"
+    if any(k in blob for k in ("zon", "aldeazon", "amazon", "marketplace", "ventas en línea", "ventas en linea", "venta", "comercio electrónico", "comercio electronico")):
+        return "AldeaZON"
+    if any(k in blob for k in ("fundación", "fundacion", "social", "comunidad", "donación", "donaciones", "ayuda", "beneficio", "ambiental")):
+        return "Fundación Aldea"
+    if any(k in blob for k in ("contabilidad", "contable", "finanzas", "costo", "costos", "factura", "facturación", "facturacion", "impuesto", "auditoría", "auditoria", "balance", "presupuesto", "gasto", "gastos")):
+        return "Contabilidad"
+    if any(k in blob for k in ("talento", "rrhh", "humano", "personal", "reclutamiento", "contratación", "contratacion", "planilla", "nómina", "nomina", "capacitación", "capacitacion")):
         return "Talento Humano"
-    return "Tecnología e Innovación"
+    if any(k in blob for k in ("certificación", "certificacion", "calidad", "norma", "iso", "estándar", "estandar")):
+        return "Certificación"
+    if any(k in blob for k in ("ti", "sistemas", "tecnología", "tecnologia", "desarrollo", "software", "computación", "redes", "it", "programación", "programacion", "soporte técnico", "soporte tecnico")):
+        return "TI"
+    if any(k in blob for k in ("producto", "productos", "inventario", "stock", "bodega", "almacén", "almacen")):
+        return "Productos"
+    return "Aldea Global"
 
 
 def _suggest_result_from_form(merged: dict) -> str:
@@ -990,7 +996,7 @@ REGLAS DE ASESORÍA:
 
 CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
 - 'titulo': Nombre de la iniciativa.
-- 'unidad': Unidad de negocio.
+- 'unidad': Unidad de negocio (debe ser estrictamente una de estas opciones: 'Aldea Global', 'Aldea Coffee', 'AldeaZON', 'Fundación Aldea', 'Contabilidad', 'Talento Humano', 'Certificación', 'TI', 'Productos').
 - 'problema_oportunidad': El problema o la oportunidad.
 - 'resultado_esperado': Qué se espera lograr.
 - 'mvp': Producto Mínimo Viable.
