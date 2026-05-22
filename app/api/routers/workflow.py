@@ -21,6 +21,7 @@ from app.scoring import (
     build_potenciadores_payload,
     criteria_to_explanations,
     criteria_to_scores,
+    default_business_scores,
 )
 from app.schemas.initiative_workflow import (
     BusinessEvaluationInput,
@@ -134,7 +135,38 @@ def _conversation_potenciadores(conversation: Optional[db.Conversation]) -> Opti
     if not conversation:
         return None
     parsed = _json_loads(conversation.potenciadores, None)
-    return parsed if isinstance(parsed, dict) else None
+    if isinstance(parsed, dict):
+        return parsed
+    form_data = _json_loads(conversation.form_data, {})
+    if isinstance(form_data, dict):
+        nested = form_data.get("potenciadores")
+        if isinstance(nested, dict):
+            return nested
+    return None
+
+
+def _ensure_potenciadores_for_legacy(
+    conversation: db.Conversation,
+    session: Session,
+) -> Optional[Dict[str, Any]]:
+    potenciadores = _conversation_potenciadores(conversation)
+    if potenciadores:
+        return potenciadores
+
+    form_data = _json_loads(conversation.form_data, {})
+    if not isinstance(form_data, dict) or not form_data:
+        return None
+
+    potenciadores = build_potenciadores_payload(
+        default_business_scores(3),
+        estado="sugerido",
+        fuente="ia",
+        comentario="Evaluación provisional para iniciativa sin score persistido.",
+        resumen="Revisar y confirmar criterios en detalle.",
+    )
+    conversation.potenciadores = json.dumps(potenciadores, ensure_ascii=False)
+    session.add(conversation)
+    return potenciadores
 
 
 def _weighted_score(potenciadores: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -143,7 +175,7 @@ def _weighted_score(potenciadores: Optional[Dict[str, Any]]) -> Optional[float]:
     value = potenciadores.get("score")
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (Type, ValueError):
         return None
 
 
@@ -411,10 +443,16 @@ def list_workflows(
         .limit(limit)
         .all()
     )
-    return [
-        _serialize_workflow_list_item(workflow, conversation)
-        for workflow, conversation in rows
-    ]
+    needs_commit = False
+    items: List[Dict[str, Any]] = []
+    for workflow, conversation in rows:
+        if not _conversation_potenciadores(conversation):
+            if _ensure_potenciadores_for_legacy(conversation, session):
+                needs_commit = True
+        items.append(_serialize_workflow_list_item(workflow, conversation))
+    if needs_commit:
+        session.commit()
+    return items
 
 
 @router.post("/{conversation_id}/submit-committee", response_model=WorkflowStatusResponse)
@@ -808,6 +846,11 @@ def get_workflow(
     roles: Set[str] = Depends(_get_rbac_roles),
 ):
     workflow = _get_workflow_for_read(conversation_id, session, user_id, roles)
+    conversation = workflow.conversation
+    if conversation and not _conversation_potenciadores(conversation):
+        if _ensure_potenciadores_for_legacy(conversation, session):
+            session.commit()
+            session.refresh(workflow)
     return _serialize_workflow(workflow)
 
 
