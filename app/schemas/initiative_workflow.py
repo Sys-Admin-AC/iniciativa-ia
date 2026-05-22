@@ -88,6 +88,8 @@ class WorkflowStatusResponse(BaseModel):
     technical_evaluations: List[TechnicalEvaluationResponse]
     potenciadores: Optional[Dict[str, Any]] = None
     weighted_score: Optional[float] = None
+    roi_detalle: Optional[Dict[str, Any]] = None
+    roi: Optional[float] = None
 
 
 class WorkflowListItemResponse(BaseModel):
@@ -105,3 +107,5 @@ class WorkflowListItemResponse(BaseModel):
     form_data: Dict[str, Any]
     potenciadores: Optional[Dict[str, Any]] = None
     weighted_score: Optional[float] = None
+    roi_detalle: Optional[Dict[str, Any]] = None
+    roi: Optional[float] = None

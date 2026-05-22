@@ -12,6 +12,7 @@ from app.api.deps import (
     _iso,
     _require_user_id,
 )
+from app.roi import normalize_roi_form_fields
 
 router = APIRouter(tags=["history"])
 
@@ -59,6 +60,8 @@ def get_history(
             "initiative_title": c.initiative_title,
             "form_data": c.form_data,
             "potenciadores": _json_loads(c.potenciadores, None),
+            "roi_detalle": _json_loads(c.roi_detalle, None),
+            "roi": c.roi,
             "created_at": _iso(c.created_at),
             "last_activity_at": _iso(la),
         }
@@ -101,9 +104,11 @@ def get_conversation_detail(
             analysis = ""
             chat_history = [{"role": m.role, "content": m.content} for m in messages]
 
-    form_data = {}
     form_data = _json_loads(conv.form_data, {})
+    if isinstance(form_data, dict):
+        form_data = normalize_roi_form_fields(form_data)
     potenciadores = _json_loads(conv.potenciadores, None)
+    roi_detalle = _json_loads(conv.roi_detalle, None)
     if isinstance(form_data, dict) and potenciadores:
         form_data["potenciadores"] = potenciadores
 
@@ -114,6 +119,8 @@ def get_conversation_detail(
         "chat_history": chat_history,
         "form_data": form_data,
         "potenciadores": potenciadores,
+        "roi_detalle": roi_detalle,
+        "roi": conv.roi,
         "created_at": _iso(conv.created_at),
     }
 

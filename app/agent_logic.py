@@ -15,6 +15,12 @@ from app.scoring import (
     normalize_business_scores,
     normalize_business_explanations,
 )
+from app.roi import (
+    estimate_success_probability,
+    money_field_prompt,
+    money_field_text,
+    normalize_money_field,
+)
 
 ANALYSIS_PROMPT = """Eres un Analista Experto en Negocios y Estrategia.
 Te han presentado una nueva iniciativa con un nivel de detalle profundo:
@@ -37,8 +43,8 @@ VALIDACIÓN Y KPIS:
 {kpis_str}
 
 VALOR DEL NEGOCIO:
-- Beneficio Cualitativo: {beneficio_esperado}
-- Valor Estimado: {valor_estimado}
+- Beneficio Esperado: {beneficio_esperado}
+- Costo Estimado: {valor_estimado}
 
 {strategic_context}
 
@@ -93,11 +99,30 @@ ANÁLISIS:
 {analysis}
 """
 
+ROI_PROBABILITY_PROMPT = """Eres un comité experto estimando la probabilidad de éxito de iniciativas de IA.
+Calcula una probabilidad entre 0 y 1 considerando:
+- Madurez y disponibilidad de datos.
+- Claridad del caso de negocio y KPIs.
+- Alcance del MVP.
+- Complejidad de ejecución y dependencias.
+- Capacidad de adopción del negocio.
+
+Devuelve solo JSON válido, sin markdown, con:
+- p_exito: número entre 0 y 1.
+- explicacion: una línea breve.
+
+INICIATIVA:
+{initiative_json}
+
+ANÁLISIS:
+{analysis}
+"""
+
 # Tool schemas for structured updates
 class UpdateFormField(BaseModel):
-    """Actualiza un campo de texto simple en el formulario de la iniciativa."""
+    """Actualiza un campo del formulario de la iniciativa."""
     field_name: str = Field(..., description="El nombre técnico del campo (titulo, unidad, problema_oportunidad, resultado_esperado, mvp, datos_necesarios, datos_ubicacion, impacto_operacion, validacion_exito, beneficio_esperado, valor_estimado)")
-    value: str = Field(..., description="El nuevo valor para el campo en texto claro. En 'valor_estimado' puedes incluir monto y contexto de cálculo/supuestos.")
+    value: Union[str, Dict[str, Any]] = Field(..., description="Nuevo valor. Para 'beneficio_esperado' y 'valor_estimado' usa preferiblemente {'texto': '...', 'valor': numero}. 'valor_estimado' representa costo estimado.")
 
 class KpiItem(BaseModel):
     """Un KPI del formulario: nombre del indicador, línea base y meta."""
@@ -184,9 +209,11 @@ def analyze_initiative(data: dict) -> str:
             "resultado_esperado",
             "mvp",
             "impacto_operacion",
-            "beneficio_esperado",
         )
     ).strip()
+    benefit_text = money_field_text(data.get("beneficio_esperado"))
+    if benefit_text:
+        strategic_query = f"{strategic_query}\n{benefit_text}".strip()
     strategic_context = get_strategic_context(strategic_query, limit=7)
     if not strategic_context:
         strategic_context = (
@@ -216,8 +243,8 @@ def analyze_initiative(data: dict) -> str:
         "datos_ubicacion": data.get("datos_ubicacion"),
         "impacto_operacion": data.get("impacto_operacion"),
         "validacion_exito": data.get("validacion_exito"),
-        "beneficio_esperado": data.get("beneficio_esperado"),
-        "valor_estimado": data.get("valor_estimado"),
+        "beneficio_esperado": money_field_prompt(data.get("beneficio_esperado"), "beneficio"),
+        "valor_estimado": money_field_prompt(data.get("valor_estimado"), "costo"),
         "kpis_str": kpis_str,
         "strategic_context": strategic_context,
     })
@@ -291,6 +318,32 @@ def suggest_business_score(data: dict, analysis: str) -> Dict[str, Any]:
         explanations=explanations,
         resumen=resumen or "Score sugerido según impacto, agilidad y obstáculos detectados.",
     )
+
+
+def suggest_roi_probability(data: dict, analysis: str) -> Dict[str, Any]:
+    llm = get_llm()
+    prompt_template = PromptTemplate(
+        input_variables=["initiative_json", "analysis"],
+        template=ROI_PROBABILITY_PROMPT,
+    )
+    chain = LLMChain(llm=llm, prompt=prompt_template)
+    result = chain.invoke(
+        {
+            "initiative_json": json.dumps(data, ensure_ascii=False, indent=2),
+            "analysis": analysis or "",
+        }
+    )
+    response = _extract_json_object(result["text"])
+    fallback = estimate_success_probability(data)
+    try:
+        probability = float(response.get("p_exito", fallback["p_exito"]))
+    except (TypeError, ValueError):
+        probability = fallback["p_exito"]
+    if probability > 1:
+        probability = probability / 100
+    probability = round(max(0.0, min(1.0, probability)), 2)
+    explanation = " ".join(str(response.get("explicacion") or fallback["explicacion"]).split())
+    return {"p_exito": probability, "explicacion": explanation}
 
 
 def append_score_to_analysis(analysis: str, potenciadores: Dict[str, Any]) -> str:
@@ -418,13 +471,9 @@ def _normalize_text_for_match(text: str) -> str:
 def _is_empty_field(key: str, value: Any) -> bool:
     if value is None:
         return True
-    if key == "valor_estimado":
-        if isinstance(value, (int, float)):
-            return False
-        s = str(value).strip()
-        if not s:
-            return True
-        return False
+    if key in {"beneficio_esperado", "valor_estimado"}:
+        normalized = normalize_money_field(value)
+        return not normalized.get("texto") or normalized.get("valor") is None
     if isinstance(value, (int, float)):
         return False
     return str(value).strip() == ""
@@ -559,8 +608,8 @@ def _proposal_from_last_assistant(
         "datos_ubicacion": ("ubicación de datos", "ubicacion de datos", "dónde están los datos", "donde estan los datos"),
         "impacto_operacion": ("impacto operativo",),
         "validacion_exito": ("validación del éxito", "validacion del exito", "cómo validar", "como validar"),
-        "beneficio_esperado": ("beneficio cualitativo",),
-        "valor_estimado": ("valor estimado",),
+        "beneficio_esperado": ("beneficio esperado", "beneficio cualitativo"),
+        "valor_estimado": ("costo estimado", "valor estimado"),
     }
     markers = checks.get(key, ())
     if markers and not any(m in low for m in markers) and key not in low:
@@ -568,10 +617,10 @@ def _proposal_from_last_assistant(
     extracted = _extract_text_between_quotes(content)
     if extracted:
         return extracted
-    if key == "valor_estimado":
+    if key in {"beneficio_esperado", "valor_estimado"}:
         numeric = re.search(r"(\d+(?:\.\d+)?)", low)
         if numeric:
-            return numeric.group(1)
+            return content
         return content
     return None
 
@@ -694,17 +743,17 @@ def _suggest_validation_from_form(merged: dict) -> str:
 
 
 def _suggest_qualitative_benefit_from_form(merged: dict) -> str:
-    current = str(merged.get("beneficio_esperado") or "").strip()
+    current = money_field_text(merged.get("beneficio_esperado"))
     if current:
         return current
     return "Mejor calidad de servicio, mayor confianza en la información y decisiones más rápidas basadas en evidencia."
 
 
 def _suggest_value_from_form(merged: dict) -> str:
-    current = str(merged.get("valor_estimado") or "").strip()
+    current = money_field_text(merged.get("valor_estimado"))
     if current:
         return current
-    return "USD 12,000 anuales estimados, considerando ahorro de tiempo operativo y reducción de reprocesos."
+    return "USD 12,000 estimados, considerando desarrollo, integraciones, acompañamiento y soporte inicial."
 
 
 def _guided_specific_proposal(
@@ -739,11 +788,11 @@ def _guided_specific_proposal(
         return f"Te propongo esta validación del éxito: “{val}”. ¿Te sirve?"
     if key == "beneficio_esperado":
         benefit = _suggest_qualitative_benefit_from_form(merged)
-        return f"Te propongo este beneficio esperado: “{benefit}”. ¿Lo dejamos así?"
+        return f"Te propongo este beneficio esperado: “{benefit}”. Indícame también el valor monetario estimado para calcular el ROI. ¿Lo dejamos así?"
     if key == "valor_estimado":
         value = _suggest_value_from_form(merged)
         return (
-            "Te propongo este valor estimado con contexto de negocio: "
+            "Te propongo este costo estimado con contexto de negocio: "
             f"“{value}”. ¿Lo dejamos así o ajustamos supuestos?"
         )
     return None
@@ -789,7 +838,7 @@ def _extract_user_value_for_target(field_name: str, message: str) -> Optional[st
         or len(normalized_raw) <= 18 and normalized_raw in _GENERIC_USER_CONFIRMATION_PHRASES
     ):
         return None
-    if field_name == "valor_estimado":
+    if field_name in {"beneficio_esperado", "valor_estimado"}:
         return raw
     if field_name == "datos_ubicacion":
         low = raw.lower()
@@ -855,8 +904,8 @@ def _is_generic_guided_placeholder(body: str, target: Optional[Union[Tuple[str, 
         "datos_ubicacion": ("te propongo dónde podrían estar esos datos", "te propongo donde podrian estar esos datos"),
         "impacto_operacion": ("te propongo el impacto operativo esperado",),
         "validacion_exito": ("te propongo cómo validar el éxito", "te propongo como validar el exito"),
-        "beneficio_esperado": ("te propongo el beneficio cualitativo",),
-        "valor_estimado": ("si tienes una cifra, dime el valor estimado",),
+        "beneficio_esperado": ("te propongo el beneficio esperado", "te propongo el beneficio cualitativo"),
+        "valor_estimado": ("si tienes una cifra, dime el costo estimado", "si tienes una cifra, dime el valor estimado"),
     }
     markers = placeholder_markers.get(key, ())
     if any(m in low for m in markers):
@@ -919,6 +968,8 @@ def _apply_form_updates(
             field_name = args.get("field_name")
             val = args.get("value")
             if field_name and field_name in _GUIDED_SCALAR_ORDER and field_name != "kpis":
+                if field_name in {"beneficio_esperado", "valor_estimado"}:
+                    val = normalize_money_field(val)
                 base[field_name] = val
         elif name == "UpdateKpis":
             raw_items = args.get("items") if args.get("items") is not None else args.get("kpis")
@@ -976,8 +1027,8 @@ def _guided_question(target: Optional[Union[Tuple[str, str], Tuple[str, int, str
             "datos_ubicacion": "Te propongo dónde podrían estar esos datos; dime si coincide con tu operación.",
             "impacto_operacion": "Te propongo el impacto operativo esperado; dime si lo ajustamos.",
             "validacion_exito": "Te propongo cómo validar el éxito; dime si esa medición te sirve.",
-            "beneficio_esperado": "Te propongo el beneficio cualitativo; dime si refleja el valor real.",
-            "valor_estimado": "Si tienes una cifra, dime el valor estimado; si no, te propongo un rango razonable para validar.",
+            "beneficio_esperado": "Dime el beneficio esperado y un valor monetario estimado para usarlo en el ROI.",
+            "valor_estimado": "Dime el costo estimado de implementar la iniciativa; si no tienes cifra, te ayudo a estimarlo.",
         }
         return q.get(
             key,
@@ -1084,7 +1135,9 @@ MODO GUIADO (activo en esta petición):
 - Para datos necesarios, pregunta en lenguaje simple: qué información usa hoy el equipo, dónde vive (Excel, sistema, correos, PDFs, reportes) y quién la tiene.
 - Explica validación como: "cómo sabremos que la iniciativa funcionó".
 - Convierte beneficios vagos en KPIs sugeridos con indicador, línea base y meta.
-- Si el usuario no sabe el valor estimado, ayuda a estimarlo con horas, personas involucradas, errores, reprocesos o demoras. Si no alcanza, propón dejarlo como estimación preliminar editable.
+- Para beneficio esperado, guarda un objeto con texto y valor monetario estimado: {'texto': 'beneficio cualitativo/contexto', 'valor': numero}.
+- Para valor_estimado, interpreta y guarda el costo estimado de implementar la iniciativa como {'texto': 'supuestos/costo', 'valor': numero}; no lo uses como beneficio.
+- Si el usuario no sabe el costo estimado, ayuda a estimarlo con horas, personas involucradas, integraciones, infraestructura o soporte. Si no alcanza, propón dejarlo como estimación preliminar editable.
 """
     ) if guided_mode else ""
 
@@ -1100,7 +1153,8 @@ REGLAS DE ASESORÍA:
 1. Actúa como asesor: Si el usuario dice algo que no se alinea con el contexto estratégico anterior, sugiérele mejoras de forma colaborativa.
 2. Cita el plan: Si usas información de la base de conocimientos, menciona algo como "Según el plan estratégico..." o "El modelo de entrada sugiere...".
 3. Relleno proactivo: Cada vez que el usuario proporcione información relevante para un campo de texto, usa 'UpdateFormField' con el field_name y value correctos. Reformula la respuesta en lenguaje profesional de negocio antes de guardarla.
-3.1. Para 'valor_estimado', puedes devolver texto con monto + contexto (supuestos, periodo y fuente del cálculo). No lo limites a solo dígitos.
+3.1. Para 'beneficio_esperado', devuelve {'texto': '...', 'valor': numero} cuando puedas estimar un beneficio monetario.
+3.2. Para 'valor_estimado', devuelve {'texto': '...', 'valor': numero}; este campo representa costo estimado de implementación, no beneficio.
 4. **KPIs (indicadores)**: No uses UpdateFormField para los KPIs. Usa la herramienta **'UpdateKpis'** con el array **'items'**: cada elemento debe incluir **indicador**, **base** y **meta** (strings). Si el usuario añade o modifica un KPI, devuelve **toda la lista** de KPIs (las filas anteriores del JSON de estado + las nuevas o corregidas), nunca un solo ítem suelto sin el resto.
 5. Si el usuario menciona varios KPIs en un mensaje, consolídalos en un solo UpdateKpis.
 6. Si estás en modo guiado y el formulario aún está vacío, trata el primer mensaje del usuario como la idea inicial; no le pidas un título antes de entender esa idea.
@@ -1115,8 +1169,8 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
 - 'datos_ubicacion': Dónde están los datos.
 - 'impacto_operacion': Qué cambiará en la operación.
 - 'validacion_exito': Cómo se medirá el éxito.
-- 'beneficio_esperado': Beneficio cualitativo.
-- 'valor_estimado': Valor estimado con contexto (monto, periodo y supuestos clave).
+- 'beneficio_esperado': Beneficio esperado con texto y valor monetario estimado.
+- 'valor_estimado': Costo estimado de la iniciativa con texto, periodo y supuestos clave.
 {guided_extra}
 """
         )
@@ -1213,6 +1267,14 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
                         },
                     }
                 )
+
+    for update in form_updates:
+        if update.get("function") != "UpdateFormField":
+            continue
+        args = update.get("args") or {}
+        field_name = args.get("field_name")
+        if field_name in {"beneficio_esperado", "valor_estimado"}:
+            args["value"] = normalize_money_field(args.get("value"))
 
     initial_draft: Optional[Dict[str, str]] = None
     if (

@@ -17,6 +17,11 @@ from app.api.deps import (
     _iso,
     _require_user_id,
 )
+from app.roi import (
+    build_roi_payload,
+    estimate_success_probability,
+    normalize_roi_form_fields,
+)
 from app.scoring import (
     build_potenciadores_payload,
     criteria_to_explanations,
@@ -145,6 +150,40 @@ def _conversation_potenciadores(conversation: Optional[db.Conversation]) -> Opti
     return None
 
 
+def _conversation_roi_details(conversation: Optional[db.Conversation]) -> Optional[Dict[str, Any]]:
+    if not conversation:
+        return None
+    parsed = _json_loads(conversation.roi_detalle, None)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _ensure_roi_for_legacy(
+    conversation: db.Conversation,
+    session: Session,
+) -> Optional[Dict[str, Any]]:
+    roi_detalle = _conversation_roi_details(conversation)
+    if roi_detalle:
+        return roi_detalle
+
+    form_data = _json_loads(conversation.form_data, {})
+    if not isinstance(form_data, dict) or not form_data:
+        return None
+
+    normalized_form = normalize_roi_form_fields(form_data)
+    probability = estimate_success_probability(normalized_form)
+    roi_detalle = build_roi_payload(
+        normalized_form,
+        probability.get("p_exito"),
+        fuente="sistema",
+        explicacion=probability.get("explicacion", ""),
+    )
+    conversation.form_data = json.dumps(normalized_form, ensure_ascii=False)
+    conversation.roi_detalle = json.dumps(roi_detalle, ensure_ascii=False)
+    conversation.roi = roi_detalle.get("roi")
+    session.add(conversation)
+    return roi_detalle
+
+
 def _ensure_potenciadores_for_legacy(
     conversation: db.Conversation,
     session: Session,
@@ -175,7 +214,7 @@ def _weighted_score(potenciadores: Optional[Dict[str, Any]]) -> Optional[float]:
     value = potenciadores.get("score")
     try:
         return float(value)
-    except (Type, ValueError):
+    except (TypeError, ValueError):
         return None
 
 
@@ -358,6 +397,7 @@ def _serialize_event(event: db.InitiativeTimelineEvent) -> Dict[str, Any]:
 
 def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
     potenciadores = _conversation_potenciadores(workflow.conversation)
+    roi_detalle = _conversation_roi_details(workflow.conversation)
     return {
         "conversation_id": workflow.conversation_id,
         "current_status": _normalized_status(workflow.current_status),
@@ -371,6 +411,8 @@ def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
         ],
         "potenciadores": potenciadores,
         "weighted_score": _weighted_score(potenciadores),
+        "roi_detalle": roi_detalle,
+        "roi": workflow.conversation.roi if workflow.conversation else None,
     }
 
 
@@ -378,6 +420,7 @@ def _serialize_workflow_list_item(
     workflow: db.InitiativeWorkflow, conversation: db.Conversation
 ) -> Dict[str, Any]:
     potenciadores = _conversation_potenciadores(conversation)
+    roi_detalle = _conversation_roi_details(conversation)
     return {
         "conversation_id": workflow.conversation_id,
         "initiative_title": conversation.initiative_title,
@@ -390,9 +433,11 @@ def _serialize_workflow_list_item(
         "conversation_created_at": _iso(conversation.created_at),
         "created_at": _iso(workflow.created_at or conversation.created_at),
         "updated_at": _iso(workflow.updated_at or workflow.created_at or conversation.created_at),
-        "form_data": _json_loads(conversation.form_data, {}),
+        "form_data": normalize_roi_form_fields(_json_loads(conversation.form_data, {})),
         "potenciadores": potenciadores,
         "weighted_score": _weighted_score(potenciadores),
+        "roi_detalle": roi_detalle,
+        "roi": conversation.roi,
     }
 
 
@@ -448,6 +493,9 @@ def list_workflows(
     for workflow, conversation in rows:
         if not _conversation_potenciadores(conversation):
             if _ensure_potenciadores_for_legacy(conversation, session):
+                needs_commit = True
+        if not _conversation_roi_details(conversation):
+            if _ensure_roi_for_legacy(conversation, session):
                 needs_commit = True
         items.append(_serialize_workflow_list_item(workflow, conversation))
     if needs_commit:
@@ -847,10 +895,16 @@ def get_workflow(
 ):
     workflow = _get_workflow_for_read(conversation_id, session, user_id, roles)
     conversation = workflow.conversation
+    needs_commit = False
     if conversation and not _conversation_potenciadores(conversation):
         if _ensure_potenciadores_for_legacy(conversation, session):
-            session.commit()
-            session.refresh(workflow)
+            needs_commit = True
+    if conversation and not _conversation_roi_details(conversation):
+        if _ensure_roi_for_legacy(conversation, session):
+            needs_commit = True
+    if needs_commit:
+        session.commit()
+        session.refresh(workflow)
     return _serialize_workflow(workflow)
 
 

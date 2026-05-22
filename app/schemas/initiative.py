@@ -1,6 +1,8 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, field_validator
+
+from app.roi import normalize_money_field
 
 
 class KpiInput(BaseModel):
@@ -20,22 +22,17 @@ class InitiativeInput(BaseModel):
     impacto_operacion: str
     validacion_exito: str
     kpis: List[KpiInput]
-    beneficio_esperado: str
-    valor_estimado: Optional[str] = None
+    beneficio_esperado: Any
+    valor_estimado: Optional[Any] = None
     # Si viene seteado, se actualiza esa conversación en lugar de crear otra (evita duplicados en el historial).
     conversation_id: Optional[str] = None
 
-    @field_validator("valor_estimado", mode="before")
+    @field_validator("beneficio_esperado", "valor_estimado", mode="before")
     @classmethod
-    def normalize_valor_estimado(cls, value):
-        if value is None:
+    def normalize_money_fields(cls, value):
+        if value is None or value == "":
             return None
-        if isinstance(value, (int, float)):
-            return str(value)
-        clean = str(value).strip()
-        if not clean:
-            return None
-        return clean
+        return normalize_money_field(value)
 
 
 class ChatInput(BaseModel):

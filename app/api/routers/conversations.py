@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app import agent_logic, db
 from app.api.deps import _ensure_conversation_owner, _require_user_id
+from app.roi import build_roi_payload, estimate_success_probability, normalize_roi_form_fields
 from app.scoring import build_potenciadores_payload, default_business_scores
 from app.schemas.initiative import ChatInput, InitiativeInput
 
@@ -27,6 +28,20 @@ def _build_score_suggestion(form_payload, analysis):
             fuente="sistema",
             comentario="Sugerencia base generada por defecto al no poder calcular con IA.",
         )
+
+
+def _build_roi_details(form_payload, analysis):
+    try:
+        probability = agent_logic.suggest_roi_probability(form_payload, analysis)
+    except Exception as e:
+        logging.error(f"Error generating ROI probability: {e}")
+        probability = estimate_success_probability(form_payload)
+    return build_roi_payload(
+        form_payload,
+        probability.get("p_exito"),
+        fuente="ia" if probability else "sistema",
+        explicacion=probability.get("explicacion", ""),
+    )
 
 
 @router.post("/conversations")
@@ -56,7 +71,7 @@ def analyze(
     session: Session = Depends(db.get_db),
     user_id: int = Depends(_require_user_id),
 ):
-    form_payload = data.model_dump(exclude={"conversation_id"})
+    form_payload = normalize_roi_form_fields(data.model_dump(exclude={"conversation_id"}))
 
     try:
         analysis = agent_logic.analyze_initiative(form_payload)
@@ -65,10 +80,12 @@ def analyze(
         raise HTTPException(status_code=500, detail="Error communicating with AI service.")
 
     potenciadores = _build_score_suggestion(form_payload, analysis)
+    roi_detalle = _build_roi_details(form_payload, analysis)
     analysis = agent_logic.append_score_to_analysis(analysis, potenciadores)
     potenciadores_json = json.dumps(potenciadores, ensure_ascii=False)
+    roi_detalle_json = json.dumps(roi_detalle, ensure_ascii=False)
     title = data.titulo or "Nueva Iniciativa"
-    form_json = json.dumps(form_payload)
+    form_json = json.dumps(form_payload, ensure_ascii=False)
 
     if data.conversation_id:
         existing = (
@@ -83,6 +100,8 @@ def analyze(
             existing.initiative_title = title
             existing.form_data = form_json
             existing.potenciadores = potenciadores_json
+            existing.roi_detalle = roi_detalle_json
+            existing.roi = roi_detalle.get("roi")
             session.commit()
 
             messages = (
@@ -117,6 +136,8 @@ def analyze(
                 "conversation_id": data.conversation_id,
                 "analysis": analysis,
                 "potenciadores": potenciadores,
+                "roi_detalle": roi_detalle,
+                "roi": roi_detalle.get("roi"),
             }
 
     conv_id = str(uuid.uuid4())
@@ -125,6 +146,8 @@ def analyze(
         initiative_title=title,
         form_data=form_json,
         potenciadores=potenciadores_json,
+        roi_detalle=roi_detalle_json,
+        roi=roi_detalle.get("roi"),
         user_id=user_id,
     )
     session.add(new_conv)
@@ -134,7 +157,13 @@ def analyze(
     session.add(new_msg)
     session.commit()
 
-    return {"conversation_id": conv_id, "analysis": analysis, "potenciadores": potenciadores}
+    return {
+        "conversation_id": conv_id,
+        "analysis": analysis,
+        "potenciadores": potenciadores,
+        "roi_detalle": roi_detalle,
+        "roi": roi_detalle.get("roi"),
+    }
 
 
 @router.post("/chat")
@@ -165,10 +194,12 @@ def chat(
     )
     session.add(user_msg)
 
+    current_form = data.current_form
     if data.current_form:
         if conv.workflow and conv.workflow.current_status != "draft":
              raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
-        conv.form_data = json.dumps(data.current_form)
+        current_form = normalize_roi_form_fields(data.current_form)
+        conv.form_data = json.dumps(current_form, ensure_ascii=False)
         if data.current_form.get("titulo"):
             conv.initiative_title = data.current_form.get("titulo")
 
@@ -178,7 +209,7 @@ def chat(
         response_data = agent_logic.chat_with_agent(
             data.message,
             history,
-            current_form=data.current_form,
+            current_form=current_form,
             guided_mode=bool(data.guided_mode),
         )
         response_text = response_data["content"]
