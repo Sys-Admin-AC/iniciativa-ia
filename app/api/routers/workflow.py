@@ -20,6 +20,7 @@ from app.api.deps import (
 from app.roi import (
     build_roi_payload,
     estimate_success_probability,
+    merge_persisted_roi,
     normalize_roi_form_fields,
 )
 from app.scoring import (
@@ -154,7 +155,9 @@ def _conversation_roi_details(conversation: Optional[db.Conversation]) -> Option
     if not conversation:
         return None
     parsed = _json_loads(conversation.roi_detalle, None)
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    return merge_persisted_roi(parsed, conversation.roi)
 
 
 def _ensure_roi_for_legacy(

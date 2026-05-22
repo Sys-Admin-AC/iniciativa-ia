@@ -12,7 +12,7 @@ from app.api.deps import (
     _iso,
     _require_user_id,
 )
-from app.roi import normalize_roi_form_fields
+from app.roi import merge_persisted_roi, normalize_roi_form_fields
 
 router = APIRouter(tags=["history"])
 
@@ -109,6 +109,8 @@ def get_conversation_detail(
         form_data = normalize_roi_form_fields(form_data)
     potenciadores = _json_loads(conv.potenciadores, None)
     roi_detalle = _json_loads(conv.roi_detalle, None)
+    if isinstance(roi_detalle, dict):
+        roi_detalle = merge_persisted_roi(roi_detalle, conv.roi)
     if isinstance(form_data, dict) and potenciadores:
         form_data["potenciadores"] = potenciadores
 

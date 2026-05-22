@@ -101,6 +101,28 @@ def clamp_probability(value: Any) -> float:
     return round(max(0.0, min(1.0, parsed)), 2)
 
 
+def merge_persisted_roi(
+    roi_detalle: Optional[Dict[str, Any]],
+    column_roi: Any,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(roi_detalle, dict):
+        return None
+
+    detail_roi = roi_detalle.get("roi")
+    if column_roi is None or detail_roi not in (None, 0, 0.0):
+        return roi_detalle
+
+    try:
+        if float(column_roi) == 0:
+            return roi_detalle
+    except (TypeError, ValueError):
+        return roi_detalle
+
+    merged = dict(roi_detalle)
+    merged["roi"] = round(float(column_roi), 2)
+    return merged
+
+
 def estimate_success_probability(form_payload: Dict[str, Any]) -> Dict[str, Any]:
     payload = form_payload or {}
     probability = 0.5
