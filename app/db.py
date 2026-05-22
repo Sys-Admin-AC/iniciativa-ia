@@ -27,6 +27,7 @@ class Conversation(Base):
     id = Column(String(36), primary_key=True)
     initiative_title = Column(String(255), index=True)
     form_data = Column(LONGTEXT, nullable=True)  # Stores JSON of the full form state
+    potenciadores = Column(LONGTEXT, nullable=True)
     # Propietario en la app Yii (Yii user id). NULL = filas creadas antes de esta columna o sin rellenar.
     user_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=get_now)

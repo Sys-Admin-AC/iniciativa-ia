@@ -17,7 +17,13 @@ from app.api.deps import (
     _iso,
     _require_user_id,
 )
+from app.scoring import (
+    build_potenciadores_payload,
+    criteria_to_explanations,
+    criteria_to_scores,
+)
 from app.schemas.initiative_workflow import (
+    BusinessEvaluationInput,
     CommitteeResponseInput,
     TechnicalEvaluationInput,
     TimelineEventResponse,
@@ -38,6 +44,7 @@ STATUS_ANNULLED = "annulled"
 EVENT_SUBMITTED_TO_COMMITTEE = "submitted_to_committee"
 EVENT_SUBMITTED_TO_OPERATIONS = "submitted_to_operations_committee"
 EVENT_TECHNICAL_COMMENT_SUBMITTED = "technical_comment_submitted"
+EVENT_BUSINESS_SCORE_SUBMITTED = "business_score_submitted"
 EVENT_COMMITTEE_COMMENT_SUBMITTED = "committee_comment_submitted"
 EVENT_RETURNED_WITH_OBSERVATIONS = "returned_with_observations"
 EVENT_SUBMITTED_TO_MANAGEMENT = "submitted_to_management_committee"
@@ -121,6 +128,23 @@ def _json_loads(value: Optional[str], default):
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def _conversation_potenciadores(conversation: Optional[db.Conversation]) -> Optional[Dict[str, Any]]:
+    if not conversation:
+        return None
+    parsed = _json_loads(conversation.potenciadores, None)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _weighted_score(potenciadores: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(potenciadores, dict):
+        return None
+    value = potenciadores.get("score")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_conversation(
@@ -301,6 +325,7 @@ def _serialize_event(event: db.InitiativeTimelineEvent) -> Dict[str, Any]:
 
 
 def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
+    potenciadores = _conversation_potenciadores(workflow.conversation)
     return {
         "conversation_id": workflow.conversation_id,
         "current_status": _normalized_status(workflow.current_status),
@@ -312,12 +337,15 @@ def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
             _serialize_evaluation(evaluation)
             for evaluation in workflow.technical_evaluations
         ],
+        "potenciadores": potenciadores,
+        "weighted_score": _weighted_score(potenciadores),
     }
 
 
 def _serialize_workflow_list_item(
     workflow: db.InitiativeWorkflow, conversation: db.Conversation
 ) -> Dict[str, Any]:
+    potenciadores = _conversation_potenciadores(conversation)
     return {
         "conversation_id": workflow.conversation_id,
         "initiative_title": conversation.initiative_title,
@@ -331,6 +359,8 @@ def _serialize_workflow_list_item(
         "created_at": _iso(workflow.created_at or conversation.created_at),
         "updated_at": _iso(workflow.updated_at or workflow.created_at or conversation.created_at),
         "form_data": _json_loads(conversation.form_data, {}),
+        "potenciadores": potenciadores,
+        "weighted_score": _weighted_score(potenciadores),
     }
 
 
@@ -499,6 +529,72 @@ def submit_technical_evaluation(
         actor_user_id=user_id,
         actor_role=data.actor_role,
         actor_name=data.evaluator_name,
+        comment=data.comment,
+        payload=event_payload,
+    )
+    session.commit()
+    session.refresh(workflow)
+    return _serialize_workflow(workflow)
+
+
+@router.post(
+    "/{conversation_id}/business-evaluations",
+    response_model=WorkflowStatusResponse,
+)
+def submit_business_evaluation(
+    conversation_id: str,
+    data: BusinessEvaluationInput,
+    session: Session = Depends(db.get_db),
+    user_id: int = Depends(_require_user_id),
+    roles: Set[str] = Depends(_get_rbac_roles),
+):
+    workflow = _get_workflow_for_mutation(
+        conversation_id,
+        session,
+        user_id,
+        roles,
+        ROLE_ANY_COMMITTEE_MUTATION.union(ROLE_ADMIN_MUTATION),
+    )
+    _assert_status(
+        workflow,
+        {
+            STATUS_COMMITTEE_TI,
+            STATUS_COMMITTEE_OPERATIONS,
+            STATUS_COMMITTEE_MANAGEMENT,
+        },
+    )
+
+    actor_name = data.evaluator_name or f"Usuario {user_id}"
+    current_status = _normalized_status(workflow.current_status) or workflow.current_status
+    potenciadores = build_potenciadores_payload(
+        criteria_to_scores(data.criteria),
+        estado="oficial",
+        fuente="comite",
+        comentario=data.comment,
+        explanations=criteria_to_explanations(data.criteria),
+        resumen=data.comment or "Score confirmado por comité.",
+        actualizado_por=actor_name,
+        actualizado_en=_iso(get_now()),
+    )
+
+    conversation = workflow.conversation
+    conversation.potenciadores = json.dumps(potenciadores, ensure_ascii=False)
+
+    event_payload = {
+        "potenciadores": potenciadores,
+        "weighted_score": potenciadores.get("score"),
+    }
+    if data.payload:
+        event_payload["payload"] = data.payload
+
+    _add_event(
+        session=session,
+        workflow=workflow,
+        event_type=EVENT_BUSINESS_SCORE_SUBMITTED,
+        to_status=current_status,
+        actor_user_id=user_id,
+        actor_role=data.actor_role,
+        actor_name=actor_name,
         comment=data.comment,
         payload=event_payload,
     )

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,31 @@ class TechnicalEvaluationInput(BaseModel):
     comment: Optional[str] = None
     evaluator_name: Optional[str] = None
     actor_role: Optional[str] = "ti"
+    payload: Optional[Dict[str, Any]] = None
+
+
+BusinessCriterionName = Literal[
+    "financiero",
+    "estrategico",
+    "cliente",
+    "datos_ia",
+    "time_to_value",
+    "complejidad",
+    "riesgo",
+]
+
+
+class BusinessCriterionInput(BaseModel):
+    criterion: BusinessCriterionName
+    score: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = None
+
+
+class BusinessEvaluationInput(BaseModel):
+    criteria: List[BusinessCriterionInput] = Field(..., min_length=7)
+    comment: Optional[str] = None
+    evaluator_name: Optional[str] = None
+    actor_role: Optional[str] = "iniciativa_comite"
     payload: Optional[Dict[str, Any]] = None
 
 
@@ -61,6 +86,8 @@ class WorkflowStatusResponse(BaseModel):
     created_at: Optional[str]
     updated_at: Optional[str]
     technical_evaluations: List[TechnicalEvaluationResponse]
+    potenciadores: Optional[Dict[str, Any]] = None
+    weighted_score: Optional[float] = None
 
 
 class WorkflowListItemResponse(BaseModel):
@@ -76,3 +103,5 @@ class WorkflowListItemResponse(BaseModel):
     created_at: Optional[str]
     updated_at: Optional[str]
     form_data: Dict[str, Any]
+    potenciadores: Optional[Dict[str, Any]] = None
+    weighted_score: Optional[float] = None

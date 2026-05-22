@@ -10,9 +10,23 @@ from sqlalchemy.orm import Session
 
 from app import agent_logic, db
 from app.api.deps import _ensure_conversation_owner, _require_user_id
+from app.scoring import build_potenciadores_payload, default_business_scores
 from app.schemas.initiative import ChatInput, InitiativeInput
 
 router = APIRouter(tags=["conversations"])
+
+
+def _build_score_suggestion(form_payload, analysis):
+    try:
+        return agent_logic.suggest_business_score(form_payload, analysis)
+    except Exception as e:
+        logging.error(f"Error generating score suggestion: {e}")
+        return build_potenciadores_payload(
+            default_business_scores(),
+            estado="sugerido",
+            fuente="sistema",
+            comentario="Sugerencia base generada por defecto al no poder calcular con IA.",
+        )
 
 
 @router.post("/conversations")
@@ -50,6 +64,9 @@ def analyze(
         logging.error(f"Error calling OpenAI API: {e}")
         raise HTTPException(status_code=500, detail="Error communicating with AI service.")
 
+    potenciadores = _build_score_suggestion(form_payload, analysis)
+    analysis = agent_logic.append_score_to_analysis(analysis, potenciadores)
+    potenciadores_json = json.dumps(potenciadores, ensure_ascii=False)
     title = data.titulo or "Nueva Iniciativa"
     form_json = json.dumps(form_payload)
 
@@ -65,6 +82,7 @@ def analyze(
                 raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
             existing.initiative_title = title
             existing.form_data = form_json
+            existing.potenciadores = potenciadores_json
             session.commit()
 
             messages = (
@@ -95,11 +113,19 @@ def analyze(
                     )
                 )
             session.commit()
-            return {"conversation_id": data.conversation_id, "analysis": analysis}
+            return {
+                "conversation_id": data.conversation_id,
+                "analysis": analysis,
+                "potenciadores": potenciadores,
+            }
 
     conv_id = str(uuid.uuid4())
     new_conv = db.Conversation(
-        id=conv_id, initiative_title=title, form_data=form_json, user_id=user_id
+        id=conv_id,
+        initiative_title=title,
+        form_data=form_json,
+        potenciadores=potenciadores_json,
+        user_id=user_id,
     )
     session.add(new_conv)
     session.commit()
@@ -108,7 +134,7 @@ def analyze(
     session.add(new_msg)
     session.commit()
 
-    return {"conversation_id": conv_id, "analysis": analysis}
+    return {"conversation_id": conv_id, "analysis": analysis, "potenciadores": potenciadores}
 
 
 @router.post("/chat")

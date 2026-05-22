@@ -8,6 +8,13 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from app.qdrant_client_setup import get_qdrant_client
+from app.scoring import (
+    BUSINESS_CRITERION_KEYS,
+    build_potenciadores_payload,
+    default_business_scores,
+    normalize_business_scores,
+    normalize_business_explanations,
+)
 
 ANALYSIS_PROMPT = """Eres un Analista Experto en Negocios y Estrategia.
 Te han presentado una nueva iniciativa con un nivel de detalle profundo:
@@ -53,6 +60,37 @@ Reglas de formato para legibilidad:
 - En la siguiente línea coloca `**Iniciativa:** {titulo}`.
 - Usa encabezados `###` para las secciones principales.
 - Mantén títulos cortos y separa los párrafos con saltos de línea.
+"""
+
+SCORE_SUGGESTION_PROMPT = """Eres un comité experto priorizando iniciativas de IA.
+Con base en la información de la iniciativa y el análisis generado, asigna puntajes enteros de 1 a 5 para cada criterio.
+
+Escala general:
+1 = muy bajo o sin evidencia
+2 = bajo
+3 = medio
+4 = alto
+5 = muy alto
+
+Criterios:
+- financiero: impacto directo en ingresos, ahorro o reducción de pérdidas.
+- estrategico: alineación con prioridades críticas de la organización.
+- cliente: mejora de experiencia, acceso o tiempos del usuario final.
+- datos_ia: generación o estructuración de datos y capacidades de analítica/IA reutilizables.
+- time_to_value: 5 si genera valor en menos de 90 días; baja el puntaje si tarda más.
+- complejidad: esfuerzo técnico, integraciones y cambios arquitectónicos.
+- riesgo: incertidumbre, dependencia externa, impacto si falla o probabilidad de falla.
+
+Devuelve solo JSON válido, sin markdown.
+El JSON debe tener una clave "resumen" con una explicación general de una línea.
+También debe tener una clave "criterios"; dentro incluye financiero, estrategico, cliente, datos_ia, time_to_value, complejidad y riesgo.
+Cada criterio debe tener "puntaje" y "explicacion"; cada explicación debe ser corta, precisa y de una sola línea.
+
+INICIATIVA:
+{initiative_json}
+
+ANÁLISIS:
+{analysis}
 """
 
 # Tool schemas for structured updates
@@ -184,6 +222,79 @@ def analyze_initiative(data: dict) -> str:
         "strategic_context": strategic_context,
     })
     return _normalize_analysis_markdown(result["text"], data.get("titulo"))
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    body = (text or "").strip()
+    if not body:
+        return {}
+    try:
+        parsed = json.loads(body)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", body, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _score_fields_from_response(response: Dict[str, Any]) -> Tuple[Dict[str, int], Dict[str, str], str]:
+    criteria = response.get("criterios") if isinstance(response.get("criterios"), dict) else response
+    scores: Dict[str, Any] = {}
+    explanations: Dict[str, Any] = {}
+
+    for criterion in BUSINESS_CRITERION_KEYS:
+        value = criteria.get(criterion) if isinstance(criteria, dict) else None
+        if isinstance(value, dict):
+            scores[criterion] = value.get("puntaje", value.get("score"))
+            explanations[criterion] = value.get("explicacion", value.get("comentario", ""))
+        else:
+            scores[criterion] = value
+
+    resumen = response.get("resumen") if isinstance(response.get("resumen"), str) else ""
+    return (
+        normalize_business_scores(scores),
+        normalize_business_explanations(explanations),
+        " ".join(resumen.strip().split()),
+    )
+
+
+def suggest_business_score(data: dict, analysis: str) -> Dict[str, Any]:
+    llm = get_llm()
+    prompt_template = PromptTemplate(
+        input_variables=["initiative_json", "analysis"],
+        template=SCORE_SUGGESTION_PROMPT,
+    )
+    chain = LLMChain(llm=llm, prompt=prompt_template)
+    result = chain.invoke(
+        {
+            "initiative_json": json.dumps(data, ensure_ascii=False, indent=2),
+            "analysis": analysis or "",
+        }
+    )
+    response = _extract_json_object(result["text"])
+    normalized, explanations, resumen = _score_fields_from_response(response)
+    criteria_response = response.get("criterios") if isinstance(response.get("criterios"), dict) else response
+    if not any(key in criteria_response for key in BUSINESS_CRITERION_KEYS):
+        normalized = default_business_scores()
+    return build_potenciadores_payload(
+        normalized,
+        estado="sugerido",
+        fuente="ia",
+        comentario="Sugerencia generada automáticamente por IA.",
+        explanations=explanations,
+        resumen=resumen or "Score sugerido según impacto, agilidad y obstáculos detectados.",
+    )
+
+
+def append_score_to_analysis(analysis: str, potenciadores: Dict[str, Any]) -> str:
+    return analysis
 
 def _normalize_tool_calls(response: Any) -> List[Dict[str, Any]]:
     """Compatibilidad entre versiones de LangChain / formatos de tool_calls (dict u objetos)."""

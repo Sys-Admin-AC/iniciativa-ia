@@ -16,6 +16,16 @@ from app.api.deps import (
 router = APIRouter(tags=["history"])
 
 
+def _json_loads(value, default):
+    if not value:
+        return default
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return default
+    return parsed
+
+
 @router.get("/history")
 def get_history(
     session: Session = Depends(db.get_db),
@@ -48,6 +58,7 @@ def get_history(
             "id": c.id,
             "initiative_title": c.initiative_title,
             "form_data": c.form_data,
+            "potenciadores": _json_loads(c.potenciadores, None),
             "created_at": _iso(c.created_at),
             "last_activity_at": _iso(la),
         }
@@ -91,11 +102,10 @@ def get_conversation_detail(
             chat_history = [{"role": m.role, "content": m.content} for m in messages]
 
     form_data = {}
-    if conv.form_data:
-        try:
-            form_data = json.loads(conv.form_data)
-        except json.JSONDecodeError:
-            form_data = {}
+    form_data = _json_loads(conv.form_data, {})
+    potenciadores = _json_loads(conv.potenciadores, None)
+    if isinstance(form_data, dict) and potenciadores:
+        form_data["potenciadores"] = potenciadores
 
     return {
         "id": conv.id,
@@ -103,6 +113,7 @@ def get_conversation_detail(
         "analysis": analysis,
         "chat_history": chat_history,
         "form_data": form_data,
+        "potenciadores": potenciadores,
         "created_at": _iso(conv.created_at),
     }
 
