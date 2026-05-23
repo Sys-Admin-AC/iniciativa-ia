@@ -389,9 +389,39 @@ _GUIDED_SCALAR_ORDER = [
     "datos_ubicacion",
     "impacto_operacion",
     "validacion_exito",
-    "beneficio_esperado",
     "valor_estimado",
+    "beneficio_esperado",
 ]
+
+_FIELD_PROPOSAL_MARKERS = {
+    "problema_oportunidad": ("problema u oportunidad", "problema o oportunidad"),
+    "resultado_esperado": ("resultado esperado",),
+    "titulo": ("titulo", "título", "nombre de la iniciativa"),
+    "unidad": ("unidad de negocio",),
+    "mvp": ("mvp", "primera version", "primera versión", "producto minimo viable", "producto mínimo viable"),
+    "datos_necesarios": ("datos necesarios",),
+    "datos_ubicacion": (
+        "ubicacion de datos",
+        "ubicación de datos",
+        "donde estan los datos",
+        "donde están los datos",
+    ),
+    "impacto_operacion": (
+        "impacto operativo",
+        "impacto en la operacion",
+        "impacto en la operación",
+    ),
+    "validacion_exito": (
+        "validacion del exito",
+        "validación del éxito",
+        "validacion de exito",
+        "validación de éxito",
+        "como validar",
+        "cómo validar",
+    ),
+    "beneficio_esperado": ("beneficio esperado", "beneficio cualitativo"),
+    "valor_estimado": ("costo estimado", "valor estimado"),
+}
 
 _GENERIC_ASSISTANT_REPLIES = {
     "he actualizado el formulario con la información proporcionada.",
@@ -476,7 +506,12 @@ def _is_empty_field(key: str, value: Any) -> bool:
         return not normalized.get("texto") or normalized.get("valor") is None
     if isinstance(value, (int, float)):
         return False
-    return str(value).strip() == ""
+    text = str(value).strip()
+    if not text:
+        return True
+    if _is_conversational_feedback_message(text):
+        return True
+    return False
 
 
 def _is_blank_guided_form(current_form: Optional[dict]) -> bool:
@@ -519,14 +554,32 @@ def _is_affirmative_message(message: str) -> bool:
     if not normalized:
         return False
     normalized_simple = _normalize_text_for_match(normalized)
-    if normalized in _GENERIC_USER_CONFIRMATION_PHRASES or normalized_simple in _GENERIC_USER_CONFIRMATION_PHRASES:
-        return True
-    fragments = (
+
+    positive_phrases = (
         "me parece bien",
         "me parece excelente",
+        "si me parece excelente",
+        "este si me parece excelente",
         "me gusta",
-        "lo dejamos así",
         "lo dejamos asi",
+        "lo dejamos así",
+        "si asi dejemoslo",
+        "si así dejemoslo",
+        "asi dejemoslo",
+        "así dejemoslo",
+        "dejemoslo asi",
+        "dejémoslo así",
+    )
+    if any(phrase in normalized_simple for phrase in positive_phrases):
+        return True
+
+    if normalized_simple.startswith("no ") or normalized_simple.startswith("no,"):
+        return False
+
+    if normalized in _GENERIC_USER_CONFIRMATION_PHRASES or normalized_simple in _GENERIC_USER_CONFIRMATION_PHRASES:
+        return True
+
+    fragments = (
         "sigamos",
         "continua",
         "continúa",
@@ -539,12 +592,11 @@ def _is_affirmative_message(message: str) -> bool:
     )
     if any(frag in normalized for frag in fragments):
         return True
+
     tokens = set(normalized_simple.split())
     if "dejemoslo" in tokens and "asi" in tokens:
         return True
-    if "es" in tokens and ("correcta" in tokens or "correcto" in tokens):
-        return True
-    if "bien" in tokens and ("si" in tokens or "asi" in tokens):
+    if "bien" in tokens and "si" in tokens:
         return True
     return False
 
@@ -565,64 +617,236 @@ def _extract_text_between_quotes(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
+    candidates: List[str] = []
     quote_pairs = [("“", "”"), ('"', '"'), ("'", "'")]
     for left, right in quote_pairs:
-        start = raw.find(left)
-        if start == -1:
-            continue
-        end = raw.find(right, start + 1)
-        if end == -1:
-            continue
-        candidate = raw[start + 1:end].strip()
-        if candidate:
-            return candidate
-    return ""
+        start = 0
+        while True:
+            start = raw.find(left, start)
+            if start == -1:
+                break
+            end = raw.find(right, start + 1)
+            if end == -1:
+                break
+            candidate = raw[start + 1 : end].strip()
+            if candidate:
+                candidates.append(candidate)
+            start = end + 1
+    if not candidates:
+        return ""
+    return max(candidates, key=len)
 
 
-def _get_last_assistant_message(history: List[dict]) -> str:
-    for msg in reversed(history or []):
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") in ("assistant", "ai"):
-            return str(msg.get("content") or "")
-    return ""
+def _content_mentions_scalar_field(content: str, field_name: str) -> bool:
+    normalized = _normalize_text_for_match(content)
+    if not normalized or not field_name:
+        return False
+    markers = _FIELD_PROPOSAL_MARKERS.get(field_name, ())
+    return any(_normalize_text_for_match(marker) in normalized for marker in markers)
+
+
+def _infer_confirmed_target_from_assistant(
+    history: List[dict],
+) -> Optional[Union[Tuple[str, str], Tuple[str, int, str]]]:
+    content = _get_last_assistant_message(history)
+    if not content:
+        return None
+    normalized = _normalize_text_for_match(content)
+    priority = (
+        "mvp",
+        "titulo",
+        "resultado_esperado",
+        "unidad",
+        "datos_necesarios",
+        "datos_ubicacion",
+        "impacto_operacion",
+        "validacion_exito",
+        "beneficio_esperado",
+        "valor_estimado",
+    )
+    for field_name in priority:
+        if _content_mentions_scalar_field(content, field_name):
+            return ("scalar", field_name)
+    if any(token in normalized for token in ("kpi", "indicador", "linea base", "línea base", "meta")):
+        return ("kpi", 0, "indicador")
+    return None
+
+
+def _proposal_from_assistant_text(
+    content: str,
+    target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+) -> Optional[str]:
+    if not target or not content:
+        return None
+    if target[0] == "kpi":
+        _kind, _row_idx, sub = target
+        low = _normalize_text_for_match(content)
+        markers = {
+            "indicador": ("indicador", "kpi", "metrica", "métrica"),
+            "base": ("linea base", "línea base", "base", "situacion actual", "situación actual"),
+            "meta": ("meta", "objetivo", "valor deseado"),
+        }
+        sub_markers = markers.get(sub, ())
+        if sub_markers and not any(marker in low for marker in sub_markers):
+            return None
+        extracted = _extract_text_between_quotes(content)
+        return extracted or None
+    field_name = target[1]
+    if not _content_mentions_scalar_field(content, field_name):
+        return None
+    extracted = _extract_text_between_quotes(content)
+    if extracted:
+        return extracted
+    if field_name in {"beneficio_esperado", "valor_estimado"}:
+        return content.strip() or None
+    return None
 
 
 def _proposal_from_last_assistant(
     history: List[dict],
     target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
 ) -> Optional[str]:
-    if not target or target[0] != "scalar":
+    if not target:
         return None
-    key = target[1]
     content = _get_last_assistant_message(history).strip()
     if not content:
         return None
-    low = content.lower()
-    checks = {
-        "resultado_esperado": ("resultado esperado",),
-        "titulo": ("título", "titulo"),
-        "unidad": ("unidad de negocio",),
-        "mvp": ("mvp", "primera versión", "primera version"),
-        "datos_necesarios": ("datos necesarios",),
-        "datos_ubicacion": ("ubicación de datos", "ubicacion de datos", "dónde están los datos", "donde estan los datos"),
-        "impacto_operacion": ("impacto operativo",),
-        "validacion_exito": ("validación del éxito", "validacion del exito", "cómo validar", "como validar"),
-        "beneficio_esperado": ("beneficio esperado", "beneficio cualitativo"),
-        "valor_estimado": ("costo estimado", "valor estimado"),
-    }
-    markers = checks.get(key, ())
-    if markers and not any(m in low for m in markers) and key not in low:
+    inferred = _proposal_from_assistant_text(content, target)
+    if inferred:
+        return inferred
+    if target[0] != "scalar":
+        return None
+    if _infer_confirmed_target_from_assistant(history) != target:
         return None
     extracted = _extract_text_between_quotes(content)
-    if extracted:
-        return extracted
-    if key in {"beneficio_esperado", "valor_estimado"}:
-        numeric = re.search(r"(\d+(?:\.\d+)?)", low)
-        if numeric:
-            return content
-        return content
-    return None
+    return extracted or None
+
+
+def _extract_proposal_for_confirmation(
+    history: List[dict],
+    target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+) -> Optional[str]:
+    return _proposal_from_last_assistant(history, target)
+
+
+def _upsert_scalar_form_update(
+    form_updates: List[Dict[str, Any]],
+    field_name: str,
+    value: Any,
+) -> None:
+    kept = [
+        update
+        for update in form_updates
+        if not (
+            update.get("function") == "UpdateFormField"
+            and (update.get("args") or {}).get("field_name") == field_name
+        )
+    ]
+    form_updates[:] = kept
+    form_updates.append(
+        {
+            "function": "UpdateFormField",
+            "args": {
+                "field_name": field_name,
+                "value": value,
+            },
+        }
+    )
+
+
+def _get_last_assistant_message(history: List[dict]) -> str:
+    for msg in reversed(history or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") in ("assistant", "ai", "agent"):
+            return str(msg.get("content") or "")
+    return ""
+
+
+def _resolve_guided_confirmation_target(
+    history: List[dict],
+    merged_before: dict,
+    target_before: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+    message: str,
+) -> Optional[Union[Tuple[str, str], Tuple[str, int, str]]]:
+    if not _is_affirmative_message(message):
+        return target_before
+    inferred = _infer_confirmed_target_from_assistant(history)
+    if inferred:
+        return inferred
+    return target_before
+
+
+def _has_update_for_target(
+    form_updates: List[Dict[str, Any]],
+    target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+) -> bool:
+    if not target:
+        return False
+    if target[0] == "scalar":
+        field_name = target[1]
+        for update in form_updates or []:
+            if update.get("function") != "UpdateFormField":
+                continue
+            args = update.get("args") or {}
+            if args.get("field_name") != field_name:
+                continue
+            value = args.get("value")
+            if value is None or value == "":
+                continue
+            return True
+        return False
+    if target[0] == "kpi":
+        return any((update.get("function") == "UpdateKpis") for update in (form_updates or []))
+    return False
+
+
+def _append_guided_confirmation_fallback(
+    form_updates: List[Dict[str, Any]],
+    *,
+    history: List[dict],
+    merged_before: dict,
+    target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+    message: str,
+) -> None:
+    if _append_guided_unit_correction_fallback(
+        form_updates,
+        history=history,
+        target_before=target,
+        message=message,
+    ):
+        return
+    if not target or not _is_affirmative_message(message):
+        return
+
+    if target[0] == "kpi":
+        _kind, row_idx, sub = target
+        inferred_value = _extract_proposal_for_confirmation(history, target)
+        if not inferred_value:
+            return
+        kpis = copy.deepcopy(merged_before.get("kpis") or [{"indicador": "", "base": "", "meta": ""}])
+        while len(kpis) <= row_idx:
+            kpis.append({"indicador": "", "base": "", "meta": ""})
+        if not isinstance(kpis[row_idx], dict):
+            kpis[row_idx] = {"indicador": "", "base": "", "meta": ""}
+        kpis[row_idx][sub] = inferred_value
+        form_updates[:] = [update for update in form_updates if update.get("function") != "UpdateKpis"]
+        form_updates.append(
+            {
+                "function": "UpdateKpis",
+                "args": {"items": _merge_kpi_items(merged_before.get("kpis") or [], kpis)},
+            }
+        )
+        return
+
+    if target[0] != "scalar" or _message_mentions_kpi_instruction(message):
+        return
+
+    field_name = target[1]
+    inferred_value = _extract_proposal_for_confirmation(history, target)
+    if not inferred_value:
+        return
+    _upsert_scalar_form_update(form_updates, field_name, inferred_value)
 
 
 def _suggest_title_from_form(merged: dict) -> str:
@@ -670,6 +894,153 @@ def _suggest_unit_from_form(merged: dict) -> str:
     if any(k in blob for k in ("producto", "productos", "inventario", "stock", "bodega", "almacén", "almacen")):
         return "Productos"
     return "Aldea Global"
+
+
+_VALID_BUSINESS_UNITS = (
+    "Aldea Global",
+    "Aldea Coffee",
+    "AldeaZON",
+    "Fundación Aldea",
+    "Contabilidad",
+    "Talento Humano",
+    "Certificación",
+    "TI",
+    "Productos",
+)
+
+_BUSINESS_UNIT_ALIASES = {
+    "aldea global": "Aldea Global",
+    "aldea coffee": "Aldea Coffee",
+    "coffee": "Aldea Coffee",
+    "cafe": "Aldea Coffee",
+    "café": "Aldea Coffee",
+    "aldeazon": "AldeaZON",
+    "zon": "AldeaZON",
+    "fundacion aldea": "Fundación Aldea",
+    "fundación aldea": "Fundación Aldea",
+    "fundacion": "Fundación Aldea",
+    "contabilidad": "Contabilidad",
+    "conta": "Contabilidad",
+    "finanzas": "Contabilidad",
+    "talento humano": "Talento Humano",
+    "rrhh": "Talento Humano",
+    "humano": "Talento Humano",
+    "certificacion": "Certificación",
+    "certificación": "Certificación",
+    "ti": "TI",
+    "it": "TI",
+    "tecnologia": "TI",
+    "tecnología": "TI",
+    "sistemas": "TI",
+    "productos": "Productos",
+}
+
+
+def _normalize_business_unit(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = _normalize_text_for_match(text)
+    for unit in _VALID_BUSINESS_UNITS:
+        if _normalize_text_for_match(unit) == normalized:
+            return unit
+    return _BUSINESS_UNIT_ALIASES.get(normalized)
+
+
+def _match_business_unit_in_text(text: str) -> Optional[str]:
+    normalized = _normalize_text_for_match(text)
+    if not normalized:
+        return None
+    for unit in sorted(_VALID_BUSINESS_UNITS, key=len, reverse=True):
+        unit_norm = _normalize_text_for_match(unit)
+        if unit_norm in normalized:
+            return unit
+    for alias, canonical in sorted(_BUSINESS_UNIT_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
+        if len(alias) <= 3:
+            if re.search(rf"\b{re.escape(alias)}\b", normalized):
+                return canonical
+        elif alias in normalized:
+            return canonical
+    return None
+
+
+def _extract_business_unit_from_message(message: str) -> Optional[str]:
+    raw = (message or "").strip()
+    if not raw:
+        return None
+    direct = _match_business_unit_in_text(raw)
+    if direct:
+        return direct
+    for segment in re.split(r"[,;]", raw):
+        match = _match_business_unit_in_text(segment.strip())
+        if match:
+            return match
+    normalized = _normalize_text_for_match(raw)
+    tail_patterns = (
+        r"(?:ponle|pon|es|sea|seria|sería|debe ser|realmente es|mejor|unidad|area|área)\s+(.+)$",
+    )
+    for pattern in tail_patterns:
+        found = re.search(pattern, normalized)
+        if not found:
+            continue
+        match = _match_business_unit_in_text(found.group(1))
+        if match:
+            return match
+    return None
+
+
+def _is_unit_correction_context(
+    history: List[dict],
+    target_before: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+) -> bool:
+    if target_before == ("scalar", "unidad"):
+        return True
+    if _infer_confirmed_target_from_assistant(history) == ("scalar", "unidad"):
+        return True
+    return "unidad de negocio" in _get_last_assistant_message(history).lower()
+
+
+def _append_guided_unit_correction_fallback(
+    form_updates: List[Dict[str, Any]],
+    *,
+    history: List[dict],
+    target_before: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+    message: str,
+) -> bool:
+    unit = _extract_business_unit_from_message(message)
+    if not unit or not _is_unit_correction_context(history, target_before):
+        return False
+    if _has_update_for_target(form_updates, ("scalar", "unidad")):
+        for update in form_updates:
+            if update.get("function") != "UpdateFormField":
+                continue
+            args = update.get("args") or {}
+            if args.get("field_name") == "unidad":
+                args["value"] = unit
+        return True
+    form_updates.append(
+        {
+            "function": "UpdateFormField",
+            "args": {
+                "field_name": "unidad",
+                "value": unit,
+            },
+        }
+    )
+    return True
+
+
+def _build_unit_correction_content(
+    current_form: Optional[dict],
+    form_updates: List[Dict[str, Any]],
+) -> Optional[str]:
+    merged_after = _apply_form_updates(current_form, form_updates)
+    unit = _normalize_business_unit(merged_after.get("unidad"))
+    if not unit:
+        return None
+    nxt = _next_guided_target(merged_after)
+    next_line = _guided_specific_proposal(nxt, merged_after) or _guided_question(nxt)
+    return f'Perfecto, dejamos la unidad de negocio en “{unit}”. {next_line}'
 
 
 def _suggest_result_from_form(merged: dict) -> str:
@@ -756,6 +1127,32 @@ def _suggest_value_from_form(merged: dict) -> str:
     return "USD 12,000 estimados, considerando desarrollo, integraciones, acompañamiento y soporte inicial."
 
 
+def _money_field_parts(value: Any) -> Dict[str, Any]:
+    normalized = normalize_money_field(value)
+    return {
+        "texto": str(normalized.get("texto") or "").strip(),
+        "valor": normalized.get("valor"),
+    }
+
+
+def _merge_money_field(existing: Any, incoming: Any) -> Dict[str, Any]:
+    current = _money_field_parts(existing)
+    new_value = _money_field_parts(incoming)
+    return {
+        "texto": new_value["texto"] or current["texto"],
+        "valor": new_value["valor"] if new_value["valor"] is not None else current["valor"],
+    }
+
+
+def _money_field_target(field_name: str, value: Any) -> Optional[Tuple[str, str, str]]:
+    parts = _money_field_parts(value)
+    if not parts["texto"]:
+        return ("money", field_name, "texto")
+    if parts["valor"] is None:
+        return ("money", field_name, "valor")
+    return None
+
+
 def _guided_specific_proposal(
     target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]], merged: dict
 ) -> Optional[str]:
@@ -827,9 +1224,114 @@ def _default_value_for_scalar_target(
     return None
 
 
+def _is_conversational_feedback_message(message: str) -> bool:
+    normalized = _normalize_text_for_match(message)
+    if not normalized:
+        return False
+
+    positive_phrases = (
+        "me parece bien",
+        "me parece excelente",
+        "si me parece excelente",
+        "este si me parece excelente",
+        "me gusta",
+        "si asi dejemoslo",
+        "si así dejemoslo",
+    )
+    if any(phrase in normalized for phrase in positive_phrases):
+        return False
+
+    if normalized.startswith("no ") or normalized.startswith("no,"):
+        return True
+
+    markers = (
+        "no me parece",
+        "me parece que",
+        "ponle",
+        "pongas",
+        "le pongas",
+        "algo asi",
+        "o algo asi",
+        "en vez de",
+        "mejor que",
+        "cambialo",
+        "cambiala",
+        "ajustalo",
+        "ajustala",
+        "no quiero",
+        "prefiero que",
+        "no es para nada",
+        "no es mi tema",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _value_echoes_user_message(value: Any, message: str) -> bool:
+    if isinstance(value, dict):
+        parts = [
+            str(value.get("texto") or ""),
+            str(value.get("valor") or ""),
+        ]
+        text = " ".join(part for part in parts if part).strip()
+    else:
+        text = str(value or "").strip()
+    normalized_value = _normalize_text_for_match(text)
+    normalized_message = _normalize_text_for_match(message)
+    if not normalized_value or not normalized_message:
+        return False
+    if normalized_value == normalized_message:
+        return True
+    if len(normalized_message) >= 24 and normalized_message in normalized_value:
+        return True
+    if len(normalized_value) >= 24 and normalized_value in normalized_message:
+        return True
+    return False
+
+
+def _strip_invalid_guided_form_updates(
+    form_updates: List[Dict[str, Any]],
+    message: str,
+    *,
+    guided_mode: bool,
+) -> List[Dict[str, Any]]:
+    if not guided_mode:
+        return form_updates
+
+    cleaned: List[Dict[str, Any]] = []
+    for update in form_updates or []:
+        name = (update.get("function") or update.get("name") or "").strip()
+        if name != "UpdateFormField":
+            cleaned.append(update)
+            continue
+        args = update.get("args") or {}
+        value = args.get("value")
+        if value is None or value == "":
+            continue
+        if isinstance(value, dict):
+            has_text = bool(str(value.get("texto") or "").strip())
+            has_number = value.get("valor") not in (None, "")
+            if not has_text and not has_number:
+                continue
+        text_value = value.get("texto") if isinstance(value, dict) else str(value or "")
+        if _is_conversational_feedback_message(text_value):
+            continue
+        if _value_echoes_user_message(value, message):
+            continue
+        if _is_conversational_feedback_message(message) and _value_echoes_user_message(value, message):
+            continue
+        cleaned.append(update)
+    return cleaned
+
+
 def _extract_user_value_for_target(field_name: str, message: str) -> Optional[str]:
     raw = (message or "").strip()
     if not raw:
+        return None
+    if (
+        _is_meta_instruction_message(raw)
+        or _message_mentions_kpi_instruction(raw)
+        or _is_conversational_feedback_message(raw)
+    ):
         return None
     normalized_raw = _normalize_text_for_match(raw)
     if (
@@ -837,6 +1339,8 @@ def _extract_user_value_for_target(field_name: str, message: str) -> Optional[st
         or normalized_raw in _GENERIC_USER_CONFIRMATION_PHRASES
         or len(normalized_raw) <= 18 and normalized_raw in _GENERIC_USER_CONFIRMATION_PHRASES
     ):
+        return None
+    if len(raw) > 80:
         return None
     if field_name in {"beneficio_esperado", "valor_estimado"}:
         return raw
@@ -955,6 +1459,204 @@ Idea del usuario:
     }
 
 
+_MAX_KPI_ROWS = 10
+
+_KPI_INSTRUCTION_MARKERS = (
+    "kpi",
+    "kpis",
+    "indicador",
+    "linea base",
+    "línea base",
+    "agrega",
+    "agregar",
+    "anade",
+    "añade",
+    "añadir",
+    "pon ",
+    "ponle",
+    "modifica",
+    "actualiza",
+    "cambia",
+    "editar",
+    "corrige",
+    "otro kpi",
+    "mas kpi",
+    "más kpi",
+    "nuevo kpi",
+)
+
+_INSTRUCTION_VERBS = (
+    "agrega",
+    "agregar",
+    "anade",
+    "añade",
+    "añadir",
+    "pon",
+    "ponle",
+    "modifica",
+    "actualiza",
+    "cambia",
+    "editar",
+    "corrige",
+    "completa",
+    "llena",
+)
+
+
+def _normalize_kpi_row(item: Any) -> dict:
+    if not isinstance(item, dict):
+        return {"indicador": "", "base": "", "meta": ""}
+    indicador = str(item.get("indicador") or item.get("metrica") or "").strip()
+    base = str(
+        item.get("base") or item.get("linea_base") or item.get("lineaBase") or ""
+    ).strip()
+    meta = str(
+        item.get("meta") or item.get("meta_deseada") or item.get("metaDeseada") or ""
+    ).strip()
+    return {"indicador": indicador, "base": base, "meta": meta}
+
+
+def _is_kpi_row_empty(row: dict) -> bool:
+    return not (row.get("indicador") or row.get("base") or row.get("meta"))
+
+
+def _sanitize_kpi_list(rows: List[dict]) -> List[dict]:
+    normalized = [_normalize_kpi_row(row) for row in (rows or [])]
+    non_empty = [row for row in normalized if not _is_kpi_row_empty(row)]
+    if non_empty:
+        result = non_empty[:_MAX_KPI_ROWS]
+        if len(result) < _MAX_KPI_ROWS:
+            result.append({"indicador": "", "base": "", "meta": ""})
+        return result
+    return [{"indicador": "", "base": "", "meta": ""}]
+
+
+def _merge_kpi_items(existing: List[dict], incoming: List[dict]) -> List[dict]:
+    existing_norm = [_normalize_kpi_row(row) for row in (existing or [])]
+    incoming_norm = [_normalize_kpi_row(row) for row in (incoming or [])]
+    if not incoming_norm:
+        return _sanitize_kpi_list(existing_norm)
+
+    merged: List[dict] = []
+    max_len = max(len(existing_norm), len(incoming_norm))
+    for index in range(max_len):
+        base_row = (
+            existing_norm[index]
+            if index < len(existing_norm)
+            else {"indicador": "", "base": "", "meta": ""}
+        )
+        incoming_row = incoming_norm[index] if index < len(incoming_norm) else None
+        if incoming_row is None:
+            merged.append(dict(base_row))
+            continue
+        row = dict(base_row)
+        for key in ("indicador", "base", "meta"):
+            if incoming_row.get(key):
+                row[key] = incoming_row[key]
+        merged.append(row)
+
+    for index in range(max_len, len(incoming_norm)):
+        incoming_row = incoming_norm[index]
+        if not _is_kpi_row_empty(incoming_row):
+            merged.append(dict(incoming_row))
+
+    return _sanitize_kpi_list(merged)
+
+
+def _message_mentions_kpi_instruction(message: str) -> bool:
+    normalized = _normalize_text_for_match(message)
+    return any(marker in normalized for marker in _KPI_INSTRUCTION_MARKERS)
+
+
+def _is_meta_instruction_message(message: str) -> bool:
+    if _is_conversational_feedback_message(message):
+        return True
+    normalized = _normalize_text_for_match(message)
+    if not normalized:
+        return False
+    if any(verb in normalized for verb in _INSTRUCTION_VERBS):
+        if any(
+            token in normalized
+            for token in ("kpi", "kpis", "indicador", "base", "meta", "linea base")
+        ):
+            return True
+        if normalized.startswith(("agrega", "agregar", "anade", "añade", "pon ", "ponle", "modifica", "actualiza")):
+            return True
+    if any(token in normalized for token in ("ponle", "pongas", "le pongas")):
+        return True
+    return False
+
+
+def _extract_kpi_value_for_target(sub: str, message: str) -> Optional[str]:
+    raw = (message or "").strip()
+    if not raw or _is_affirmative_message(raw):
+        return None
+
+    lowered = raw.lower()
+    prefixes = {
+        "indicador": ("indicador", "metrica", "métrica", "kpi"),
+        "base": ("linea base", "línea base", "base"),
+        "meta": ("meta", "objetivo", "valor deseado"),
+    }
+    for prefix in prefixes.get(sub, ()):
+        marker = f"{prefix}:"
+        if marker in lowered:
+            start = lowered.index(marker) + len(marker)
+            candidate = raw[start:].strip(" .:-")
+            if candidate:
+                return candidate
+        marker = f"{prefix} "
+        if marker in lowered:
+            start = lowered.index(marker) + len(marker)
+            candidate = raw[start:].strip(" .:-")
+            if candidate:
+                return candidate
+
+    if _is_meta_instruction_message(raw) and not any(char.isdigit() for char in raw):
+        return None
+    if len(raw) > 200:
+        return None
+    if "?" in raw and _message_mentions_kpi_instruction(raw):
+        return None
+    return raw
+
+
+def _filter_guided_form_updates(
+    form_updates: List[Dict[str, Any]],
+    write_target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+    merged_before: dict,
+) -> List[Dict[str, Any]]:
+    if not write_target:
+        return form_updates
+
+    filtered: List[Dict[str, Any]] = []
+    for update in form_updates or []:
+        name = (update.get("function") or update.get("name") or "").strip()
+        args = update.get("args") or {}
+        if name == "UpdateFormField":
+            field_name = args.get("field_name")
+            value = args.get("value")
+            if field_name == "kpis":
+                continue
+            if _is_generic_confirmation_value(value) or _is_meta_instruction_message(str(value or "")):
+                continue
+            if _is_conversational_feedback_message(str(value or "")):
+                continue
+            if write_target[0] == "kpi":
+                continue
+            allowed = {write_target[1], "datos_ubicacion"}
+            if field_name not in allowed:
+                continue
+        elif name == "UpdateKpis":
+            if write_target[0] != "kpi":
+                continue
+            raw_items = args.get("items") if args.get("items") is not None else args.get("kpis")
+            if raw_items:
+                args["items"] = _merge_kpi_items(merged_before.get("kpis") or [], raw_items)
+        filtered.append(update)
+    return filtered
+
+
 def _apply_form_updates(
     current_form: Optional[dict], form_updates: List[Dict[str, Any]]
 ) -> dict:
@@ -969,42 +1671,39 @@ def _apply_form_updates(
             val = args.get("value")
             if field_name and field_name in _GUIDED_SCALAR_ORDER and field_name != "kpis":
                 if field_name in {"beneficio_esperado", "valor_estimado"}:
-                    val = normalize_money_field(val)
+                    val = _merge_money_field(base.get(field_name), val)
                 base[field_name] = val
         elif name == "UpdateKpis":
             raw_items = args.get("items") if args.get("items") is not None else args.get("kpis")
             if not raw_items:
                 continue
-            items: List[dict] = []
-            for it in raw_items:
-                if isinstance(it, dict):
-                    items.append(
-                        {
-                            "indicador": str(it.get("indicador", "") or ""),
-                            "base": str(it.get("base", "") or ""),
-                            "meta": str(it.get("meta", "") or ""),
-                        }
-                    )
-                else:
-                    items.append({"indicador": "", "base": "", "meta": ""})
-            if items:
-                base["kpis"] = items
+            base["kpis"] = _merge_kpi_items(base.get("kpis") or [], raw_items)
+    base["kpis"] = _sanitize_kpi_list(base.get("kpis") or [])
     return base
 
 
 def _next_guided_target(merged: dict) -> Optional[Union[Tuple[str, str], Tuple[str, int, str]]]:
     for key in _GUIDED_SCALAR_ORDER:
+        if key in {"valor_estimado", "beneficio_esperado"}:
+            money_target = _money_field_target(key, merged.get(key))
+            if money_target:
+                return money_target
+            continue
         if _is_empty_field(key, merged.get(key)):
             return ("scalar", key)
-    kpis = merged.get("kpis") or []
+    kpis = _sanitize_kpi_list(merged.get("kpis") or [])
     if not kpis:
         return ("kpi", 0, "indicador")
-    for i, row in enumerate(kpis):
+    for index, row in enumerate(kpis):
         if not isinstance(row, dict):
             row = {}
+        if _is_kpi_row_empty(row):
+            if len(kpis) == 1:
+                return ("kpi", index, "indicador")
+            continue
         for sub in ("indicador", "base", "meta"):
             if _is_empty_field(sub, row.get(sub)):
-                return ("kpi", i, sub)
+                return ("kpi", index, sub)
     return None
 
 
@@ -1034,6 +1733,22 @@ def _guided_question(target: Optional[Union[Tuple[str, str], Tuple[str, int, str
             key,
             "Sigamos con el siguiente dato. ¿Puedes completar este campo en una frase?",
         )
+    if kind == "money":
+        _kind, field_name, sub = target
+        if field_name == "valor_estimado":
+            if sub == "texto":
+                return (
+                    "Ahora definamos el costo estimado. Describe qué incluye el costo "
+                    "de implementación: desarrollo, equipos, integraciones, infraestructura o soporte."
+                )
+            return "Indícame el monto del costo estimado en dólares. Ejemplo: 2000."
+        if field_name == "beneficio_esperado":
+            if sub == "texto":
+                return (
+                    "Ahora definamos el beneficio esperado. Describe el valor que generará "
+                    "la iniciativa para la operación o el negocio."
+                )
+            return "Indícame el valor monetario estimado del beneficio en dólares. Ejemplo: 20400."
     if kind != "kpi":
         return "¿Qué dato te gustaría ajustar a continuación?"
     _t, row_idx, sub = target
@@ -1128,15 +1843,18 @@ MODO GUIADO (activo en esta petición):
 - Cada respuesta visible debe ser breve, amable, y terminar con una confirmación tipo "¿Lo dejamos así?" o una pregunta hacia el siguiente dato aún no guardado, salvo que el formulario esté completo.
 - Tras cualquier 'UpdateFormField' o 'UpdateKpis', no te limites a decir que actualizaste: **continúa** con la pregunta siguiente.
 - Si el usuario responde "sí", "correcto", "ok" o equivalente, toma como aprobada la propuesta anterior y guarda el campo correspondiente con la herramienta adecuada.
+- Si el usuario corrige, conversa o pide cambios ("no, me parece que...", "ponle que..."), no copies literal su mensaje al formulario: interpreta, reformula en lenguaje de negocio y recién entonces usa la herramienta.
 - Si el usuario no sabe, propone 1-2 opciones concretas. Puedes prellenar un borrador con tools cuando la idea dé evidencia suficiente, pero deja claro que es editable.
 - Si propones un valor para un campo, menciona el nombre del campo en lenguaje natural para que el usuario sepa qué está aprobando.
 - Antes de pedir cada campo, explica en una frase qué significa. Ejemplo: "Resultado esperado significa qué debería mejorar si esto funciona".
 - Explica MVP así: "una primera versión simple para probar si la idea funciona, sin construir todo desde el inicio".
 - Para datos necesarios, pregunta en lenguaje simple: qué información usa hoy el equipo, dónde vive (Excel, sistema, correos, PDFs, reportes) y quién la tiene.
 - Explica validación como: "cómo sabremos que la iniciativa funcionó".
+- Después de validación, pide primero el costo estimado en dos pasos: 1) qué incluye el costo, 2) monto del costo estimado.
+- Luego pide el beneficio esperado en dos pasos: 1) descripción del beneficio, 2) valor monetario estimado del beneficio.
+- Para beneficio esperado, guarda un objeto con texto y valor monetario estimado: {'texto': 'beneficio cualitativo/contexto', 'valor': numero}. Si solo tienes texto o solo monto, conserva lo anterior y completa la parte faltante.
+- Para valor_estimado, interpreta y guarda el costo estimado de implementar la iniciativa como {'texto': 'supuestos/costo', 'valor': numero}; no lo uses como beneficio. Si solo tienes texto o solo monto, conserva lo anterior y completa la parte faltante.
 - Convierte beneficios vagos en KPIs sugeridos con indicador, línea base y meta.
-- Para beneficio esperado, guarda un objeto con texto y valor monetario estimado: {'texto': 'beneficio cualitativo/contexto', 'valor': numero}.
-- Para valor_estimado, interpreta y guarda el costo estimado de implementar la iniciativa como {'texto': 'supuestos/costo', 'valor': numero}; no lo uses como beneficio.
 - Si el usuario no sabe el costo estimado, ayuda a estimarlo con horas, personas involucradas, integraciones, infraestructura o soporte. Si no alcanza, propón dejarlo como estimación preliminar editable.
 """
     ) if guided_mode else ""
@@ -1153,11 +1871,12 @@ REGLAS DE ASESORÍA:
 1. Actúa como asesor: Si el usuario dice algo que no se alinea con el contexto estratégico anterior, sugiérele mejoras de forma colaborativa.
 2. Cita el plan: Si usas información de la base de conocimientos, menciona algo como "Según el plan estratégico..." o "El modelo de entrada sugiere...".
 3. Relleno proactivo: Cada vez que el usuario proporcione información relevante para un campo de texto, usa 'UpdateFormField' con el field_name y value correctos. Reformula la respuesta en lenguaje profesional de negocio antes de guardarla.
-3.1. Para 'beneficio_esperado', devuelve {'texto': '...', 'valor': numero} cuando puedas estimar un beneficio monetario.
-3.2. Para 'valor_estimado', devuelve {'texto': '...', 'valor': numero}; este campo representa costo estimado de implementación, no beneficio.
-4. **KPIs (indicadores)**: No uses UpdateFormField para los KPIs. Usa la herramienta **'UpdateKpis'** con el array **'items'**: cada elemento debe incluir **indicador**, **base** y **meta** (strings). Si el usuario añade o modifica un KPI, devuelve **toda la lista** de KPIs (las filas anteriores del JSON de estado + las nuevas o corregidas), nunca un solo ítem suelto sin el resto.
+3.1. Para 'valor_estimado', devuelve {{'texto': '...', 'valor': numero}}; este campo representa costo estimado de implementación, no beneficio. Si el usuario solo da el monto, devuelve el valor numérico en 'valor' y no inventes otro texto.
+3.2. Para 'beneficio_esperado', devuelve {{'texto': '...', 'valor': numero}} cuando puedas estimar un beneficio monetario. Si el usuario solo da el monto, devuelve el valor numérico en 'valor' y no inventes otro texto.
+4. **KPIs (indicadores)**: No uses UpdateFormField para los KPIs. Usa la herramienta **'UpdateKpis'** con el array **'items'**: cada elemento debe incluir **indicador**, **base** y **meta** (strings). Si el usuario pide completar base o meta de un KPI existente, **actualiza esa fila** en el array; no crees filas nuevas vacías. Si añade otro KPI, conserva los anteriores con sus datos y agrega solo la fila nueva.
 5. Si el usuario menciona varios KPIs en un mensaje, consolídalos en un solo UpdateKpis.
-6. Si estás en modo guiado y el formulario aún está vacío, trata el primer mensaje del usuario como la idea inicial; no le pidas un título antes de entender esa idea.
+6. No copies al formulario instrucciones meta del chat (por ejemplo "agrega la base", "pon otro KPI") ni el texto literal del usuario si está corrigiendo o conversando; interpreta la intención, reformula y actualiza el campo correcto.
+7. Si estás en modo guiado y el formulario aún está vacío, trata el primer mensaje del usuario como la idea inicial; no le pidas un título antes de entender esa idea.
 
 CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
 - 'titulo': Nombre de la iniciativa.
@@ -1189,6 +1908,7 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
     
     merged_before = _apply_form_updates(current_form, [])
     target_before = _next_guided_target(merged_before) if guided_mode else None
+    confirmation_target = None
     response = llm_with_tools.invoke(messages)
 
     form_updates: List[Dict[str, Any]] = []
@@ -1198,6 +1918,51 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
                 "function": call["name"],
                 "args": call.get("args") or {},
             }
+        )
+
+    for update in form_updates:
+        if update.get("function") != "UpdateKpis":
+            continue
+        args = update.get("args") or {}
+        raw_items = args.get("items") if args.get("items") is not None else args.get("kpis")
+        if raw_items:
+            args["items"] = _merge_kpi_items(merged_before.get("kpis") or [], raw_items)
+
+    if guided_mode:
+        confirmation_target = _resolve_guided_confirmation_target(
+            history,
+            merged_before,
+            target_before,
+            message,
+        )
+        write_target = (
+            confirmation_target
+            if _is_affirmative_message(message)
+            else target_before
+        )
+        form_updates = _filter_guided_form_updates(form_updates, write_target, merged_before)
+        if _is_conversational_feedback_message(message) and not _is_affirmative_message(message):
+            unit_override = _extract_business_unit_from_message(message)
+            correcting_unidad = _is_unit_correction_context(history, target_before)
+            form_updates = [
+                update
+                for update in form_updates
+                if update.get("function") != "UpdateFormField"
+                or (
+                    correcting_unidad
+                    and unit_override
+                    and (update.get("args") or {}).get("field_name") == "unidad"
+                    and _normalize_business_unit((update.get("args") or {}).get("value")) == unit_override
+                )
+            ]
+
+    unit_correction_applied = False
+    if guided_mode:
+        unit_correction_applied = _append_guided_unit_correction_fallback(
+            form_updates,
+            history=history,
+            target_before=target_before,
+            message=message,
         )
 
     # Sanitiza tool calls: evita guardar confirmaciones genéricas como valor de campos.
@@ -1212,41 +1977,18 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
         if not _is_generic_confirmation_value(value):
             continue
         inferred = _proposal_from_last_assistant(history, ("scalar", str(field_name)))
-        if not inferred:
-            inferred = _default_value_for_scalar_target(("scalar", str(field_name)), merged_before)
         if inferred:
             args["value"] = inferred
 
-    # Fallback defensivo: si el usuario confirma una propuesta en modo guiado y el LLM
-    # no ejecutó tool call, inferimos el guardado del campo sugerido para no romper el flujo.
-    if guided_mode and not form_updates and target_before and target_before[0] == "scalar":
-        field_name = target_before[1]
-        if _is_affirmative_message(message):
-            inferred_value = _proposal_from_last_assistant(history, target_before) or _default_value_for_scalar_target(
-                target_before, merged_before
-            )
-            if inferred_value:
-                form_updates.append(
-                    {
-                        "function": "UpdateFormField",
-                        "args": {
-                            "field_name": field_name,
-                            "value": inferred_value,
-                        },
-                    }
-                )
-        else:
-            explicit_value = _extract_user_value_for_target(field_name, message)
-            if explicit_value:
-                form_updates.append(
-                    {
-                        "function": "UpdateFormField",
-                        "args": {
-                            "field_name": field_name,
-                            "value": explicit_value,
-                        },
-                    }
-                )
+    if guided_mode:
+        _append_guided_confirmation_fallback(
+            form_updates,
+            history=history,
+            merged_before=merged_before,
+            target=confirmation_target,
+            message=message,
+        )
+
     # Si el usuario menciona explícitamente el origen SQL/BD, guarda también ubicación de datos
     # aunque el modelo no lo haya hecho en este turno.
     if guided_mode:
@@ -1268,13 +2010,15 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
                     }
                 )
 
+    money_state = _apply_form_updates(current_form, [])
     for update in form_updates:
         if update.get("function") != "UpdateFormField":
             continue
         args = update.get("args") or {}
         field_name = args.get("field_name")
         if field_name in {"beneficio_esperado", "valor_estimado"}:
-            args["value"] = normalize_money_field(args.get("value"))
+            args["value"] = _merge_money_field(money_state.get(field_name), args.get("value"))
+            money_state[field_name] = args["value"]
 
     initial_draft: Optional[Dict[str, str]] = None
     if (
@@ -1318,6 +2062,10 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
     content_out = _append_guided_followup(
         response.content or "", guided_mode, current_form, form_updates
     )
+    if unit_correction_applied:
+        corrected_content = _build_unit_correction_content(current_form, form_updates)
+        if corrected_content:
+            content_out = corrected_content
     if initial_draft:
         content_out = (
             "Te propongo redactar el problema u oportunidad así: "
@@ -1354,12 +2102,26 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             else ""
         )
     # Capa final de seguridad: evita respuestas genéricas cuando aún faltan campos/KPIs.
-    if guided_mode and _is_generic_update_reply(content_out):
+    if guided_mode and _is_generic_update_reply(content_out) and not unit_correction_applied:
         merged_after = _apply_form_updates(current_form, form_updates)
         nxt_after = _next_guided_target(merged_after)
         if nxt_after is not None:
             forced = _guided_specific_proposal(nxt_after, merged_after) or _guided_question(nxt_after)
             content_out = f"Listo, avanzamos. {forced}"
+
+    form_updates = _strip_invalid_guided_form_updates(
+        form_updates,
+        message,
+        guided_mode=guided_mode,
+    )
+    if guided_mode:
+        _append_guided_confirmation_fallback(
+            form_updates,
+            history=history,
+            merged_before=merged_before,
+            target=confirmation_target,
+            message=message,
+        )
 
     return {
         "content": content_out,
