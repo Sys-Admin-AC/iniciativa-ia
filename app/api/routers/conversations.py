@@ -72,6 +72,23 @@ def analyze(
     user_id: int = Depends(_require_user_id),
 ):
     form_payload = normalize_roi_form_fields(data.model_dump(exclude={"conversation_id"}))
+    try:
+        bibliografia_analisis = agent_logic.analyze_bibliography_sources(
+            form_payload.get("bibliografia") or [],
+            initiative_payload=form_payload,
+        )
+    except Exception as e:
+        logging.error(f"Error analyzing bibliography sources: {e}")
+        bibliografia_analisis = {
+            "resumen": "No se pudo completar el análisis de confiabilidad de fuentes.",
+            "riesgo_general": "medio",
+            "fuentes": [],
+        }
+    form_payload["bibliografia_analisis"] = bibliografia_analisis
+    form_payload["resumen_iniciativa"] = agent_logic.generate_initiative_summary(
+        form_payload,
+        bibliografia_analisis,
+    )
 
     try:
         analysis = agent_logic.analyze_initiative(form_payload)
@@ -138,6 +155,8 @@ def analyze(
                 "potenciadores": potenciadores,
                 "roi_detalle": roi_detalle,
                 "roi": roi_detalle.get("roi"),
+                "bibliografia_analisis": bibliografia_analisis,
+                "resumen_iniciativa": form_payload.get("resumen_iniciativa"),
             }
 
     conv_id = str(uuid.uuid4())
@@ -163,6 +182,8 @@ def analyze(
         "potenciadores": potenciadores,
         "roi_detalle": roi_detalle,
         "roi": roi_detalle.get("roi"),
+        "bibliografia_analisis": bibliografia_analisis,
+        "resumen_iniciativa": form_payload.get("resumen_iniciativa"),
     }
 
 

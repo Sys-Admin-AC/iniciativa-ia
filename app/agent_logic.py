@@ -2,7 +2,10 @@ import os
 import json
 import copy
 import re
+from html.parser import HTMLParser
 from typing import List, Optional, Any, Dict, Tuple, Union
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.prompts import PromptTemplate
@@ -46,6 +49,9 @@ VALOR DEL NEGOCIO:
 - Beneficio Esperado: {beneficio_esperado}
 - Costo Estimado: {valor_estimado}
 
+BIBLIOGRAFÍA Y CONFIABILIDAD:
+{bibliografia_context}
+
 {strategic_context}
 
 Por favor, realiza un análisis crítico, objetivo y estructurado de esta iniciativa:
@@ -58,6 +64,7 @@ Por favor, realiza un análisis crítico, objetivo y estructurado de esta inicia
    - Ejes/objetivos estratégicos relacionados.
    - Evidencia concreta tomada del contexto, citando la fuente si aparece.
    - Ajustes recomendados para mejorar la alineación.
+6. Confiabilidad de fuentes: Resume si la bibliografía incluida es suficiente y confiable para sustentar la iniciativa.
 
 Presenta tus resultados en formato Markdown, de forma analítica y colaborativa.
 Reglas de formato para legibilidad:
@@ -118,6 +125,44 @@ ANÁLISIS:
 {analysis}
 """
 
+BIBLIOGRAPHY_RELIABILITY_PROMPT = """Eres un analista evaluando la confiabilidad de fuentes usadas para sustentar una iniciativa de negocio.
+Evalúa cada URL con señales objetivas: reputación del dominio, claridad del contenido disponible, posible sesgo comercial, actualidad aparente y pertinencia para la iniciativa.
+
+Devuelve solo JSON válido, sin markdown, con esta forma:
+{
+  "resumen": "síntesis breve",
+  "riesgo_general": "bajo|medio|alto",
+  "fuentes": [
+    {
+      "url": "...",
+      "dominio": "...",
+      "confiabilidad": "alta|media|baja",
+      "estado": "contenido_obtenido|heuristica",
+      "senales_favor": ["..."],
+      "senales_alerta": ["..."],
+      "recomendacion": "..."
+    }
+  ]
+}
+
+INICIATIVA:
+{initiative_json}
+
+FUENTES:
+{sources_json}
+"""
+
+INITIATIVE_SUMMARY_PROMPT = """Resume esta iniciativa en 3 a 5 líneas para un comité ejecutivo.
+Explica en síntesis: qué problema resuelve, cómo se implementaría, qué valor espera generar y qué fuentes la sustentan.
+No uses markdown complejo ni listas largas.
+
+INICIATIVA:
+{initiative_json}
+
+ANÁLISIS DE FUENTES:
+{bibliografia_analisis}
+"""
+
 # Tool schemas for structured updates
 class UpdateFormField(BaseModel):
     """Actualiza un campo del formulario de la iniciativa."""
@@ -136,6 +181,30 @@ class UpdateKpis(BaseModel):
         ...,
         description="Array de KPIs. Siempre envía el listado entero con la forma [{indicador, base, meta}, ...]. Mínimo un elemento.",
     )
+
+class _HtmlTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self._in_title = False
+        self.parts: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        self._in_title = tag.lower() == "title"
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        text = re.sub(r"\s+", " ", data or "").strip()
+        if not text:
+            return
+        if self._in_title and not self.title:
+            self.title = text[:180]
+        elif len(" ".join(self.parts)) < 1800:
+            self.parts.append(text)
+
 
 def get_llm():
     return ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
@@ -165,6 +234,171 @@ def get_strategic_context(query: str, limit: int = 5) -> str:
     except Exception as e:
         print(f"Error searching RAG: {e}")
         return ""
+
+
+def _normalize_bibliography_items(items: Any) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for item in items or []:
+        url = item.get("url") if isinstance(item, dict) else item
+        url = str(url or "").strip()
+        if not url:
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            normalized.append({"url": url, "dominio": parsed.netloc.lower()})
+    return normalized
+
+
+def _fetch_source_snapshot(url: str) -> Dict[str, Any]:
+    parsed = urlparse(url)
+    snapshot: Dict[str, Any] = {
+        "url": url,
+        "dominio": parsed.netloc.lower(),
+        "estado": "heuristica",
+        "titulo": "",
+        "extracto": "",
+        "error": "",
+    }
+    try:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; IniciativaIA/1.0; +https://aldeaglobal.com)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+            },
+        )
+        with urlopen(request, timeout=6) as response:
+            content_type = response.headers.get("Content-Type", "")
+            raw = response.read(120_000)
+        text = raw.decode("utf-8", errors="ignore")
+        if "html" in content_type.lower() or "<html" in text[:500].lower():
+            parser = _HtmlTextExtractor()
+            parser.feed(text)
+            snapshot["titulo"] = parser.title
+            snapshot["extracto"] = re.sub(r"\s+", " ", " ".join(parser.parts)).strip()[:1800]
+        else:
+            snapshot["extracto"] = re.sub(r"\s+", " ", text).strip()[:1800]
+        if snapshot["extracto"] or snapshot["titulo"]:
+            snapshot["estado"] = "contenido_obtenido"
+    except Exception as exc:
+        snapshot["error"] = str(exc)[:220]
+    return snapshot
+
+
+def _fallback_bibliography_analysis(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    trusted_suffixes = (".edu", ".gov", ".gob", ".org")
+    analyzed = []
+    low_count = 0
+    for source in sources:
+        domain = str(source.get("dominio") or "").lower()
+        has_content = source.get("estado") == "contenido_obtenido"
+        reliability = "media"
+        favor = []
+        alerts = []
+        if any(domain.endswith(suffix) or suffix in domain for suffix in trusted_suffixes):
+            reliability = "alta"
+            favor.append("Dominio institucional o de organización reconocible.")
+        if has_content:
+            favor.append("Se obtuvo contenido para revisar pertinencia.")
+        else:
+            alerts.append("No se pudo descargar contenido; evaluación basada en dominio y URL.")
+        if not domain or "." not in domain:
+            reliability = "baja"
+            alerts.append("Dominio no verificable.")
+        if reliability == "baja":
+            low_count += 1
+        analyzed.append(
+            {
+                "url": source.get("url"),
+                "dominio": domain,
+                "confiabilidad": reliability,
+                "estado": source.get("estado") or "heuristica",
+                "senales_favor": favor or ["URL con formato válido."],
+                "senales_alerta": alerts,
+                "recomendacion": "Complementar con una fuente institucional o primaria." if alerts else "Fuente utilizable como soporte, validar actualidad del contenido.",
+            }
+        )
+    risk = "alto" if low_count else "medio" if any(item["confiabilidad"] == "media" for item in analyzed) else "bajo"
+    return {
+        "resumen": "Evaluación automática de fuentes basada en contenido disponible y señales del dominio.",
+        "riesgo_general": risk,
+        "fuentes": analyzed,
+    }
+
+
+def analyze_bibliography_sources(urls: Any, initiative_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    items = _normalize_bibliography_items(urls)
+    snapshots = [_fetch_source_snapshot(item["url"]) for item in items]
+    fallback = _fallback_bibliography_analysis(snapshots)
+    if not snapshots:
+        return fallback
+    try:
+        llm = get_llm()
+        prompt = BIBLIOGRAPHY_RELIABILITY_PROMPT.replace(
+            "{initiative_json}",
+            json.dumps(initiative_payload or {}, ensure_ascii=False, indent=2),
+        ).replace(
+            "{sources_json}",
+            json.dumps(snapshots, ensure_ascii=False, indent=2),
+        )
+        response = llm.invoke(
+            prompt
+        )
+        raw = getattr(response, "content", response)
+        parsed = json.loads(_strip_json_fence(str(raw)))
+        if isinstance(parsed, dict) and isinstance(parsed.get("fuentes"), list):
+            parsed.setdefault("resumen", fallback["resumen"])
+            parsed.setdefault("riesgo_general", fallback["riesgo_general"])
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+def bibliography_analysis_markdown(analysis: Any) -> str:
+    if not isinstance(analysis, dict):
+        return "No se recibió análisis de bibliografía."
+    lines = [
+        f"Resumen: {analysis.get('resumen') or 'Sin resumen disponible.'}",
+        f"Riesgo general: {analysis.get('riesgo_general') or 'sin clasificar'}",
+        "",
+    ]
+    for item in analysis.get("fuentes") or []:
+        lines.append(
+            "- "
+            f"{item.get('url')} | confiabilidad: {item.get('confiabilidad', 'sin clasificar')} | "
+            f"estado: {item.get('estado', 'sin estado')} | recomendación: {item.get('recomendacion', '')}"
+        )
+    return "\n".join(lines).strip()
+
+
+def generate_initiative_summary(form_payload: Dict[str, Any], bibliography_analysis: Any) -> str:
+    try:
+        llm = get_llm()
+        prompt = INITIATIVE_SUMMARY_PROMPT.replace(
+            "{initiative_json}",
+            json.dumps(form_payload or {}, ensure_ascii=False, indent=2),
+        ).replace(
+            "{bibliografia_analisis}",
+            json.dumps(bibliography_analysis or {}, ensure_ascii=False, indent=2),
+        )
+        response = llm.invoke(
+            prompt
+        )
+        summary = str(getattr(response, "content", response) or "").strip()
+        if summary:
+            return summary
+    except Exception:
+        pass
+    title = str(form_payload.get("titulo") or "La iniciativa").strip()
+    problem = str(form_payload.get("problema_oportunidad") or "").strip()
+    result = str(form_payload.get("resultado_esperado") or "").strip()
+    benefit = money_field_text(form_payload.get("beneficio_esperado"))
+    return (
+        f"{title} busca atender: {problem or 'una oportunidad de mejora operativa'}. "
+        f"El resultado esperado es {result or 'mejorar eficiencia y control del proceso'}. "
+        f"El beneficio principal es {benefit or 'generar valor medible para la operación'}."
+    )
 
 
 def _normalize_analysis_markdown(text: str, title: Optional[str]) -> str:
@@ -214,6 +448,8 @@ def analyze_initiative(data: dict) -> str:
     benefit_text = money_field_text(data.get("beneficio_esperado"))
     if benefit_text:
         strategic_query = f"{strategic_query}\n{benefit_text}".strip()
+    bibliography_analysis = data.get("bibliografia_analisis")
+    bibliography_context = bibliography_analysis_markdown(bibliography_analysis)
     strategic_context = get_strategic_context(strategic_query, limit=7)
     if not strategic_context:
         strategic_context = (
@@ -228,7 +464,7 @@ def analyze_initiative(data: dict) -> str:
             "mvp", "datos_necesarios", "datos_ubicacion", 
             "impacto_operacion", "validacion_exito", 
             "beneficio_esperado", "valor_estimado",
-            "kpis_str", "strategic_context"
+            "kpis_str", "bibliografia_context", "strategic_context"
         ],
         template=ANALYSIS_PROMPT
     )
@@ -246,6 +482,7 @@ def analyze_initiative(data: dict) -> str:
         "beneficio_esperado": money_field_prompt(data.get("beneficio_esperado"), "beneficio"),
         "valor_estimado": money_field_prompt(data.get("valor_estimado"), "costo"),
         "kpis_str": kpis_str,
+        "bibliografia_context": bibliography_context,
         "strategic_context": strategic_context,
     })
     return _normalize_analysis_markdown(result["text"], data.get("titulo"))

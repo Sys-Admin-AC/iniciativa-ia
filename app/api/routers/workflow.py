@@ -160,6 +160,30 @@ def _conversation_roi_details(conversation: Optional[db.Conversation]) -> Option
     return merge_persisted_roi(parsed, conversation.roi)
 
 
+def _assert_bibliography_ready(conversation: db.Conversation) -> None:
+    form_data = _json_loads(conversation.form_data, {})
+    if not isinstance(form_data, dict):
+        raise HTTPException(status_code=400, detail="La iniciativa debe incluir bibliografía antes de enviarse a comité.")
+    bibliography = form_data.get("bibliografia") or []
+    urls = [
+        (item.get("url") if isinstance(item, dict) else item)
+        for item in bibliography
+    ]
+    urls = [str(url or "").strip() for url in urls if str(url or "").strip()]
+    if len(urls) < 3:
+        raise HTTPException(status_code=400, detail="Agrega al menos 3 URLs de bibliografía antes de enviar a comité.")
+    analysis = form_data.get("bibliografia_analisis")
+    if not isinstance(analysis, dict):
+        raise HTTPException(status_code=400, detail="Procesa el análisis de bibliografía antes de enviar a comité.")
+    risk = str(analysis.get("riesgo_general") or "").lower()
+    if risk in {"alto", "high"}:
+        raise HTTPException(status_code=409, detail="La bibliografía tiene riesgo alto; revisa las fuentes antes de enviar.")
+    for source in analysis.get("fuentes") or []:
+        reliability = str((source or {}).get("confiabilidad") or "").lower()
+        if "baja" in reliability or reliability == "low":
+            raise HTTPException(status_code=409, detail="La bibliografía incluye fuentes de confiabilidad baja.")
+
+
 def _ensure_roi_for_legacy(
     conversation: db.Conversation,
     session: Session,
@@ -515,6 +539,7 @@ def submit_to_committee(
 ):
     workflow = _get_workflow(conversation_id, session, user_id, create=True)
     _assert_status(workflow, {STATUS_DRAFT})
+    _assert_bibliography_ready(workflow.conversation)
     _add_event(
         session=session,
         workflow=workflow,
