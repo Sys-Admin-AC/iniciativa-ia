@@ -5,12 +5,14 @@ from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, cre
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
+import app.config  # noqa: F401 — carga variables desde .env
 from app.utils import get_now
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "mariadb+pymysql://root:root@192.168.1.112:3306/talento_humano",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL no está definida. Configúrala en el archivo .env del proyecto."
+    )
 
 ENGINE_OPTIONS = {"pool_pre_ping": True}
 if DATABASE_URL.startswith(("mysql", "mariadb")):
