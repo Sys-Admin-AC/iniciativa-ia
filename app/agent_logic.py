@@ -2723,7 +2723,7 @@ REGLAS DE ASESORÍA:
 3.2. Para 'beneficio_esperado', devuelve {{'texto': '...', 'comunicacion': '...', 'valor': numero}} cuando puedas estimar un beneficio monetario. Si el usuario solo da el monto, devuelve el valor numérico en 'valor'.
 4. **KPIs (indicadores)**: No uses UpdateFormField para los KPIs. Usa la herramienta **'UpdateKpis'** con el array **'items'**: cada elemento debe incluir **indicador**, **base** y **meta** (strings). Si el usuario pide completar base o meta de un KPI existente, **actualiza esa fila** en el array; no crees filas nuevas vacías. Si añade otro KPI, conserva los anteriores con sus datos y agrega solo la fila nueva.
 5. Si el usuario menciona varios KPIs en un mensaje, consolídalos en un solo UpdateKpis.
-5.1. Para bibliografía, usa **UpdateBibliography** con items [{url: 'https://...', uso: 'para qué sirve'}, ...]. Nunca uses UpdateFormField para bibliografia. Si propones URLs en el chat y el usuario confirma, debes llamar UpdateBibliography con esas URLs y un uso breve por fuente.
+5.1. Para bibliografía, usa **UpdateBibliography** con items [{{url: 'https://...', uso: 'para qué sirve'}}, ...]. Nunca uses UpdateFormField para bibliografia. Si propones URLs en el chat y el usuario confirma, debes llamar UpdateBibliography con esas URLs y un uso breve por fuente.
 6. No copies al formulario instrucciones meta del chat (por ejemplo "agrega la base", "pon otro KPI") ni el texto literal del usuario si está corrigiendo o conversando; interpreta la intención, reformula y actualiza el campo correcto.
 7. Si estás en modo guiado y el formulario aún está vacío, trata el primer mensaje del usuario como la idea inicial; no le pidas un título antes de entender esa idea.
 
