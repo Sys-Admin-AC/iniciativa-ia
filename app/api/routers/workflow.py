@@ -178,13 +178,6 @@ def _assert_bibliography_ready(conversation: db.Conversation) -> None:
     analysis = form_data.get("bibliografia_analisis")
     if not isinstance(analysis, dict):
         raise HTTPException(status_code=400, detail="Procesa el análisis de bibliografía antes de enviar a comité.")
-    risk = str(analysis.get("riesgo_general") or "").lower()
-    if risk in {"alto", "high"}:
-        raise HTTPException(status_code=409, detail="La bibliografía tiene riesgo alto; revisa las fuentes antes de enviar.")
-    for source in analysis.get("fuentes") or []:
-        reliability = str((source or {}).get("confiabilidad") or "").lower()
-        if "baja" in reliability or reliability == "low":
-            raise HTTPException(status_code=409, detail="La bibliografía incluye fuentes de confiabilidad baja.")
 
 
 def _assert_data_quality_ready(conversation: db.Conversation) -> None:
