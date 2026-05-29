@@ -14,18 +14,24 @@ class CommitteeResponseInput(WorkflowActionInput):
     response_type: str = "user_review"
 
 
+TechnicalCriterionName = Literal["complejidad", "riesgo"]
+
+
 class TechnicalCriterionInput(BaseModel):
-    criterion: str
-    score: int = Field(..., ge=1, le=5)
+    criterion: TechnicalCriterionName
+    score: int = Field(..., ge=0, le=5)
     comment: Optional[str] = None
 
 
 class TechnicalEvaluationInput(BaseModel):
-    criteria: List[TechnicalCriterionInput] = Field(..., min_length=1)
+    criteria: List[TechnicalCriterionInput] = Field(..., min_length=2, max_length=2)
     comment: Optional[str] = None
     evaluator_name: Optional[str] = None
     actor_role: Optional[str] = "ti"
     payload: Optional[Dict[str, Any]] = None
+    dias_implementacion_ti: Optional[int] = Field(None, ge=1, le=730)
+    factor_innovador_ti_score: Optional[int] = Field(None, ge=0, le=5)
+    factor_innovador_ti_comment: Optional[str] = None
 
 
 BusinessCriterionName = Literal[
@@ -34,19 +40,17 @@ BusinessCriterionName = Literal[
     "cliente",
     "datos_ia",
     "time_to_value",
-    "complejidad",
-    "riesgo",
 ]
 
 
 class BusinessCriterionInput(BaseModel):
     criterion: BusinessCriterionName
-    score: int = Field(..., ge=1, le=5)
+    score: int = Field(..., ge=0, le=5)
     comment: Optional[str] = None
 
 
 class BusinessEvaluationInput(BaseModel):
-    criteria: List[BusinessCriterionInput] = Field(..., min_length=7)
+    criteria: List[BusinessCriterionInput] = Field(..., min_length=5, max_length=5)
     comment: Optional[str] = None
     evaluator_name: Optional[str] = None
     actor_role: Optional[str] = "iniciativa_comite"
@@ -90,6 +94,9 @@ class WorkflowStatusResponse(BaseModel):
     weighted_score: Optional[float] = None
     roi_detalle: Optional[Dict[str, Any]] = None
     roi: Optional[float] = None
+    dias_implementacion_ti: Optional[int] = None
+    dias_implementacion_estimados: Optional[int] = None
+    factor_innovador_ti: Optional[Dict[str, Any]] = None
 
 
 class WorkflowListItemResponse(BaseModel):

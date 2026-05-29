@@ -2,6 +2,7 @@ import os
 import json
 import copy
 import re
+import ast
 from html.parser import HTMLParser
 from typing import List, Optional, Any, Dict, Tuple, Union
 from urllib.parse import urlparse
@@ -13,6 +14,8 @@ from langchain.chains import LLMChain
 from app.qdrant_client_setup import get_qdrant_client
 from app.scoring import (
     BUSINESS_CRITERION_KEYS,
+    apply_implementation_days_to_potenciadores,
+    apply_time_to_value_from_days,
     build_potenciadores_payload,
     default_business_scores,
     normalize_business_scores,
@@ -22,7 +25,10 @@ from app.roi import (
     estimate_success_probability,
     money_field_prompt,
     money_field_text,
+    normalize_beneficio_field,
     normalize_money_field,
+    beneficio_field_text,
+    effective_implementation_days,
 )
 
 ANALYSIS_PROMPT = """Eres un Analista Experto en Negocios y Estrategia.
@@ -39,6 +45,7 @@ OBJETIVO ESTRATÉGICO:
 DATOS E IMPACTO:
 - Datos Necesarios: {datos_necesarios} (Dónde están: {datos_ubicacion})
 - Impacto Operativo: {impacto_operacion}
+- Días estimados de implementación: {dias_implementacion_estimados}
 
 VALIDACIÓN Y KPIS:
 - Metodología de Validación: {validacion_exito}
@@ -46,8 +53,14 @@ VALIDACIÓN Y KPIS:
 {kpis_str}
 
 VALOR DEL NEGOCIO:
-- Beneficio Esperado: {beneficio_esperado}
+{beneficio_esperado}
 - Costo Estimado: {valor_estimado}
+
+CALIDAD DE DATA Y DOCUMENTACIÓN:
+{calidad_datos_context}
+
+FACTOR INNOVADOR (evaluación previa):
+{factor_innovador_context}
 
 BIBLIOGRAFÍA Y CONFIABILIDAD:
 {bibliografia_context}
@@ -65,6 +78,8 @@ Por favor, realiza un análisis crítico, objetivo y estructurado de esta inicia
    - Evidencia concreta tomada del contexto, citando la fuente si aparece.
    - Ajustes recomendados para mejorar la alineación.
 6. Confiabilidad de fuentes: Resume si la bibliografía incluida es suficiente y confiable para sustentar la iniciativa.
+7. Calidad de data y documentación: Evalúa si los datos declarados y la documentación respaldan la propuesta. Usa el contexto de calidad de data provisto.
+8. Factor innovador: Evalúa si la iniciativa aporta novedad real frente a lo existente. Usa el contexto de factor innovador provisto.
 
 Presenta tus resultados en formato Markdown, de forma analítica y colaborativa.
 Reglas de formato para legibilidad:
@@ -89,14 +104,14 @@ Criterios:
 - financiero: impacto directo en ingresos, ahorro o reducción de pérdidas.
 - estrategico: alineación con prioridades críticas de la organización.
 - cliente: mejora de experiencia, acceso o tiempos del usuario final.
-- datos_ia: generación o estructuración de datos y capacidades de analítica/IA reutilizables.
-- time_to_value: 5 si genera valor en menos de 90 días; baja el puntaje si tarda más.
-- complejidad: esfuerzo técnico, integraciones y cambios arquitectónicos.
-- riesgo: incertidumbre, dependencia externa, impacto si falla o probabilidad de falla.
+- datos_ia: generación o estructuración de datos y capacidades de analítica/IA reutilizables. Usa calidad_datos_analisis si está disponible.
+- time_to_value: 5 si genera valor en 90 días o menos; si dias_implementacion_estimados > 90 el puntaje debe bajar (91-180 → máx 3; >180 → máx 2).
+
+Complejidad y riesgo los evalúa TI por separado; no los incluyas en este score.
 
 Devuelve solo JSON válido, sin markdown.
 El JSON debe tener una clave "resumen" con una explicación general de una línea.
-También debe tener una clave "criterios"; dentro incluye financiero, estrategico, cliente, datos_ia, time_to_value, complejidad y riesgo.
+También debe tener una clave "criterios"; dentro incluye financiero, estrategico, cliente, datos_ia y time_to_value.
 Cada criterio debe tener "puntaje" y "explicacion"; cada explicación debe ser corta, precisa y de una sola línea.
 
 INICIATIVA:
@@ -163,6 +178,50 @@ ANÁLISIS DE FUENTES:
 {bibliografia_analisis}
 """
 
+DATA_QUALITY_PROMPT = """Eres un analista de datos evaluando la calidad de la información y documentación que respalda una iniciativa.
+
+Evalúa completitud, accesibilidad, trazabilidad documental y gobernanza de los datos declarados.
+
+Devuelve solo JSON válido, sin markdown, con esta forma:
+{
+  "puntaje_global": 1,
+  "nivel": "baja|media|alta",
+  "resumen": "...",
+  "dimensiones": {
+    "completitud": {"puntaje": 1, "observacion": "..."},
+    "accesibilidad": {"puntaje": 1, "observacion": "..."},
+    "trazabilidad_documentacion": {"puntaje": 1, "observacion": "..."},
+    "gobernanza": {"puntaje": 1, "observacion": "..."}
+  },
+  "brechas_criticas": ["..."],
+  "recomendaciones": ["..."]
+}
+
+INICIATIVA:
+{initiative_json}
+"""
+
+INNOVATION_FACTOR_PROMPT = """Eres un comité de innovación evaluando si una iniciativa aporta novedad real.
+
+Considera la idea, el MVP, las bibliografías citadas y el contexto organizacional.
+
+Devuelve solo JSON válido, sin markdown, con esta forma:
+{
+  "nivel": "bajo|medio|alto",
+  "puntaje_sugerido": 1,
+  "resumen": "...",
+  "evidencias": ["..."],
+  "brechas": ["..."],
+  "recomendacion_ti": "..."
+}
+
+INICIATIVA:
+{initiative_json}
+
+BIBLIOGRAFÍA ANALIZADA:
+{bibliografia_analisis}
+"""
+
 # Tool schemas for structured updates
 class UpdateFormField(BaseModel):
     """Actualiza un campo del formulario de la iniciativa."""
@@ -180,6 +239,18 @@ class UpdateKpis(BaseModel):
     items: List[KpiItem] = Field(
         ...,
         description="Array de KPIs. Siempre envía el listado entero con la forma [{indicador, base, meta}, ...]. Mínimo un elemento.",
+    )
+
+class BibliographyItem(BaseModel):
+    """Una fuente bibliográfica del formulario."""
+    url: str = Field(..., description="URL completa con http:// o https://")
+    uso: str = Field("", description="Para qué se utilizará esta fuente en la iniciativa")
+
+class UpdateBibliography(BaseModel):
+    """Actualiza las URLs de bibliografía del formulario. Incluye al menos 3 fuentes válidas."""
+    items: List[BibliographyItem] = Field(
+        ...,
+        description="Lista de fuentes [{url: 'https://...', uso: '...'}, ...]. Mínimo 3 URLs.",
     )
 
 class _HtmlTextExtractor(HTMLParser):
@@ -372,6 +443,153 @@ def bibliography_analysis_markdown(analysis: Any) -> str:
     return "\n".join(lines).strip()
 
 
+def _fallback_data_quality_analysis(form_payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = form_payload or {}
+    completeness = 2
+    if str(payload.get("datos_necesarios") or "").strip():
+        completeness += 1
+    if str(payload.get("datos_ubicacion") or "").strip():
+        completeness += 1
+    if str(payload.get("validacion_exito") or "").strip():
+        completeness += 1
+    completeness = min(5, completeness)
+    accessibility = 3 if str(payload.get("datos_ubicacion") or "").strip() else 2
+    traceability = 3 if isinstance(payload.get("bibliografia"), list) and len(payload.get("bibliografia") or []) >= 3 else 2
+    governance = 2
+    scores = [completeness, accessibility, traceability, governance]
+    global_score = max(1, min(5, round(sum(scores) / len(scores))))
+    level = "alta" if global_score >= 4 else "media" if global_score >= 3 else "baja"
+    gaps = []
+    if completeness < 3:
+        gaps.append("Faltan detalles sobre datos necesarios o su validación.")
+    if accessibility < 3:
+        gaps.append("No queda claro dónde residen los datos ni cómo acceder a ellos.")
+    if traceability < 3:
+        gaps.append("La documentación o bibliografía no respalda suficientemente la propuesta.")
+    return {
+        "puntaje_global": global_score,
+        "nivel": level,
+        "resumen": "Evaluación heurística de calidad de data y documentación.",
+        "dimensiones": {
+            "completitud": {"puntaje": completeness, "observacion": "Basado en campos declarados del formulario."},
+            "accesibilidad": {"puntaje": accessibility, "observacion": "Basado en ubicación de datos declarada."},
+            "trazabilidad_documentacion": {"puntaje": traceability, "observacion": "Basado en bibliografía y validación."},
+            "gobernanza": {"puntaje": governance, "observacion": "Sin evidencia explícita de owner o frecuencia de actualización."},
+        },
+        "brechas_criticas": gaps,
+        "recomendaciones": ["Documentar fuente, formato, responsable y frecuencia de actualización de cada dataset."],
+    }
+
+
+def analyze_data_quality(form_payload: Dict[str, Any]) -> Dict[str, Any]:
+    fallback = _fallback_data_quality_analysis(form_payload)
+    try:
+        llm = get_llm()
+        prompt = DATA_QUALITY_PROMPT.replace(
+            "{initiative_json}",
+            json.dumps(form_payload or {}, ensure_ascii=False, indent=2),
+        )
+        response = llm.invoke(prompt)
+        parsed = _extract_json_object(str(getattr(response, "content", response)))
+        if isinstance(parsed, dict) and parsed.get("puntaje_global") is not None:
+            parsed.setdefault("resumen", fallback["resumen"])
+            parsed.setdefault("nivel", fallback["nivel"])
+            parsed.setdefault("dimensiones", fallback["dimensiones"])
+            parsed.setdefault("brechas_criticas", fallback["brechas_criticas"])
+            parsed.setdefault("recomendaciones", fallback["recomendaciones"])
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+def data_quality_analysis_markdown(analysis: Any) -> str:
+    if not isinstance(analysis, dict):
+        return "No se recibió análisis de calidad de data."
+    lines = [
+        f"Resumen: {analysis.get('resumen') or 'Sin resumen.'}",
+        f"Puntaje global: {analysis.get('puntaje_global', 'sin dato')} ({analysis.get('nivel') or 'sin nivel'})",
+        "",
+    ]
+    dimensiones = analysis.get("dimensiones") or {}
+    for key, item in dimensiones.items():
+        if isinstance(item, dict):
+            lines.append(f"- {key}: {item.get('puntaje', '?')} — {item.get('observacion', '')}")
+    gaps = analysis.get("brechas_criticas") or []
+    if gaps:
+        lines.append("")
+        lines.append("Brechas críticas:")
+        for gap in gaps:
+            lines.append(f"- {gap}")
+    return "\n".join(lines).strip()
+
+
+def _fallback_innovation_analysis(form_payload: Dict[str, Any]) -> Dict[str, Any]:
+    mvp = str(form_payload.get("mvp") or "").lower()
+    score = 3
+    if any(token in mvp for token in ("ia", "inteligencia artificial", "machine learning", "automat")):
+        score = 4
+    return {
+        "nivel": "medio",
+        "puntaje_sugerido": score,
+        "resumen": "Evaluación heurística preliminar del grado de innovación.",
+        "evidencias": ["Descripción del MVP disponible para revisión."],
+        "brechas": ["Requiere validación de TI sobre novedad real frente a soluciones existentes."],
+        "recomendacion_ti": "Confirmar si existe solución similar interna o en el mercado antes de priorizar.",
+    }
+
+
+def analyze_innovation_factor(
+    form_payload: Dict[str, Any],
+    bibliography_analysis: Any = None,
+) -> Dict[str, Any]:
+    fallback = _fallback_innovation_analysis(form_payload)
+    try:
+        llm = get_llm()
+        prompt = INNOVATION_FACTOR_PROMPT.replace(
+            "{initiative_json}",
+            json.dumps(form_payload or {}, ensure_ascii=False, indent=2),
+        ).replace(
+            "{bibliografia_analisis}",
+            json.dumps(bibliography_analysis or {}, ensure_ascii=False, indent=2),
+        )
+        response = llm.invoke(prompt)
+        parsed = _extract_json_object(str(getattr(response, "content", response)))
+        if isinstance(parsed, dict) and parsed.get("puntaje_sugerido") is not None:
+            parsed.setdefault("resumen", fallback["resumen"])
+            parsed.setdefault("nivel", fallback["nivel"])
+            parsed.setdefault("evidencias", fallback["evidencias"])
+            parsed.setdefault("brechas", fallback["brechas"])
+            parsed.setdefault("recomendacion_ti", fallback["recomendacion_ti"])
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+def innovation_analysis_markdown(analysis: Any) -> str:
+    if not isinstance(analysis, dict):
+        return "No se recibió evaluación de factor innovador."
+    lines = [
+        f"Resumen: {analysis.get('resumen') or 'Sin resumen.'}",
+        f"Nivel: {analysis.get('nivel') or 'sin clasificar'} | Puntaje sugerido: {analysis.get('puntaje_sugerido', 'sin dato')}",
+        f"Recomendación para TI: {analysis.get('recomendacion_ti') or 'Sin recomendación.'}",
+    ]
+    evidencias = analysis.get("evidencias") or []
+    if evidencias:
+        lines.append("")
+        lines.append("Evidencias:")
+        for item in evidencias:
+            lines.append(f"- {item}")
+    brechas = analysis.get("brechas") or []
+    if brechas:
+        lines.append("")
+        lines.append("Brechas:")
+        for item in brechas:
+            lines.append(f"- {item}")
+    return "\n".join(lines).strip()
+
+
 def generate_initiative_summary(form_payload: Dict[str, Any], bibliography_analysis: Any) -> str:
     try:
         llm = get_llm()
@@ -463,12 +681,14 @@ def analyze_initiative(data: dict) -> str:
             "titulo", "unidad", "problema_oportunidad", "resultado_esperado", 
             "mvp", "datos_necesarios", "datos_ubicacion", 
             "impacto_operacion", "validacion_exito", 
-            "beneficio_esperado", "valor_estimado",
-            "kpis_str", "bibliografia_context", "strategic_context"
+            "beneficio_esperado", "valor_estimado", "dias_implementacion_estimados",
+            "kpis_str", "bibliografia_context", "strategic_context",
+            "calidad_datos_context", "factor_innovador_context",
         ],
         template=ANALYSIS_PROMPT
     )
     chain = LLMChain(llm=llm, prompt=prompt_template)
+    dias = data.get("dias_implementacion_estimados")
     result = chain.invoke({
         "titulo": data.get("titulo"),
         "unidad": data.get("unidad"),
@@ -479,11 +699,14 @@ def analyze_initiative(data: dict) -> str:
         "datos_ubicacion": data.get("datos_ubicacion"),
         "impacto_operacion": data.get("impacto_operacion"),
         "validacion_exito": data.get("validacion_exito"),
-        "beneficio_esperado": money_field_prompt(data.get("beneficio_esperado"), "beneficio"),
+        "beneficio_esperado": beneficio_field_text(data.get("beneficio_esperado")),
         "valor_estimado": money_field_prompt(data.get("valor_estimado"), "costo"),
+        "dias_implementacion_estimados": dias if dias is not None else "Sin estimación",
         "kpis_str": kpis_str,
         "bibliografia_context": bibliography_context,
         "strategic_context": strategic_context,
+        "calidad_datos_context": data_quality_analysis_markdown(data.get("calidad_datos_analisis")),
+        "factor_innovador_context": innovation_analysis_markdown(data.get("factor_innovador_analisis")),
     })
     return _normalize_analysis_markdown(result["text"], data.get("titulo"))
 
@@ -547,14 +770,34 @@ def suggest_business_score(data: dict, analysis: str) -> Dict[str, Any]:
     criteria_response = response.get("criterios") if isinstance(response.get("criterios"), dict) else response
     if not any(key in criteria_response for key in BUSINESS_CRITERION_KEYS):
         normalized = default_business_scores()
-    return build_potenciadores_payload(
+    days = effective_implementation_days(data)
+    adjusted_score, adjusted_explanation = apply_time_to_value_from_days(
+        normalized.get("time_to_value", 3),
+        days,
+        explanations.get("time_to_value", ""),
+    )
+    normalized["time_to_value"] = adjusted_score
+    explanations["time_to_value"] = adjusted_explanation
+    calidad = data.get("calidad_datos_analisis") if isinstance(data.get("calidad_datos_analisis"), dict) else {}
+    global_data_score = calidad.get("puntaje_global")
+    try:
+        global_data_score = int(global_data_score)
+    except (TypeError, ValueError):
+        global_data_score = None
+    if global_data_score is not None and global_data_score <= 2:
+        normalized["datos_ia"] = min(normalized.get("datos_ia", 3), 2)
+        explanations["datos_ia"] = (
+            f"{explanations.get('datos_ia', '')} Limitado por calidad de data ({global_data_score}/5)."
+        ).strip()
+    payload = build_potenciadores_payload(
         normalized,
         estado="sugerido",
         fuente="ia",
         comentario="Sugerencia generada automáticamente por IA.",
         explanations=explanations,
-        resumen=resumen or "Score sugerido según impacto, agilidad y obstáculos detectados.",
+        resumen=resumen or "Score sugerido según impacto y agilidad.",
     )
+    return apply_implementation_days_to_potenciadores(payload, days)
 
 
 def suggest_roi_probability(data: dict, analysis: str) -> Dict[str, Any]:
@@ -658,6 +901,15 @@ _FIELD_PROPOSAL_MARKERS = {
     ),
     "beneficio_esperado": ("beneficio esperado", "beneficio cualitativo"),
     "valor_estimado": ("costo estimado", "valor estimado"),
+    "bibliografia": (
+        "bibliografia",
+        "bibliografía",
+        "fuentes",
+        "urls de referencia",
+        "articulos",
+        "artículos",
+        "referencias",
+    ),
 }
 
 _GENERIC_ASSISTANT_REPLIES = {
@@ -738,9 +990,12 @@ def _normalize_text_for_match(text: str) -> str:
 def _is_empty_field(key: str, value: Any) -> bool:
     if value is None:
         return True
-    if key in {"beneficio_esperado", "valor_estimado"}:
-        normalized = normalize_money_field(value)
-        return not normalized.get("texto") or normalized.get("valor") is None
+    if key == "bibliografia":
+        return _bibliography_needs_fill({"bibliografia": value})
+    if key == "beneficio_esperado":
+        return _beneficio_field_target(value) is not None
+    if key == "valor_estimado":
+        return _money_field_target(key, value) is not None
     if isinstance(value, (int, float)):
         return False
     text = str(value).strip()
@@ -900,8 +1155,13 @@ def _infer_confirmed_target_from_assistant(
         "validacion_exito",
         "beneficio_esperado",
         "valor_estimado",
+        "bibliografia",
     )
     for field_name in priority:
+        if field_name == "bibliografia":
+            if _extract_urls_from_text(content):
+                return ("scalar", "bibliografia")
+            continue
         if _content_mentions_scalar_field(content, field_name):
             return ("scalar", field_name)
     if any(token in normalized for token in ("kpi", "indicador", "linea base", "línea base", "meta")):
@@ -928,6 +1188,33 @@ def _proposal_from_assistant_text(
             return None
         extracted = _extract_text_between_quotes(content)
         return extracted or None
+    if target[0] == "money":
+        field_name, sub = target[1], target[2]
+        parsed = _extract_embedded_dict_from_content(content)
+        if parsed:
+            if field_name == "beneficio_esperado":
+                if sub == "texto" and parsed.get("texto"):
+                    return str(parsed["texto"])
+                if sub == "comunicacion" and parsed.get("comunicacion"):
+                    return str(parsed["comunicacion"])
+                if sub == "valor" and parsed.get("valor") is not None:
+                    return str(parsed["valor"])
+            elif field_name == "valor_estimado":
+                if sub == "texto" and parsed.get("texto"):
+                    return str(parsed["texto"])
+                if sub == "valor" and parsed.get("valor") is not None:
+                    return str(parsed["valor"])
+        extracted = _extract_text_between_quotes(content)
+        if extracted:
+            return extracted
+        if sub == "valor":
+            from app.roi import _parse_number
+
+            for match in re.finditer(r"\d[\d.,]*", content):
+                parsed_number = _parse_number(match.group())
+                if parsed_number is not None:
+                    return str(parsed_number)
+        return None
     field_name = target[1]
     if not _content_mentions_scalar_field(content, field_name):
         return None
@@ -935,6 +1222,12 @@ def _proposal_from_assistant_text(
     if extracted:
         return extracted
     if field_name in {"beneficio_esperado", "valor_estimado"}:
+        parsed = _extract_embedded_dict_from_content(content)
+        if parsed:
+            if field_name == "beneficio_esperado" and parsed.get("texto"):
+                return str(parsed["texto"])
+            if field_name == "valor_estimado" and parsed.get("texto"):
+                return str(parsed["texto"])
         return content.strip() or None
     return None
 
@@ -951,9 +1244,9 @@ def _proposal_from_last_assistant(
     inferred = _proposal_from_assistant_text(content, target)
     if inferred:
         return inferred
-    if target[0] != "scalar":
+    if target[0] not in {"scalar", "money"}:
         return None
-    if _infer_confirmed_target_from_assistant(history) != target:
+    if target[0] == "scalar" and _infer_confirmed_target_from_assistant(history) != target:
         return None
     extracted = _extract_text_between_quotes(content)
     return extracted or None
@@ -1000,6 +1293,62 @@ def _get_last_assistant_message(history: List[dict]) -> str:
     return ""
 
 
+def _extract_embedded_dict_from_content(content: str) -> Optional[dict]:
+    text = (content or "").strip()
+    if not text or "{" not in text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if end <= start:
+        return None
+    chunk = text[start : end + 1]
+    for parser in (ast.literal_eval, json.loads):
+        try:
+            candidate = chunk if parser is ast.literal_eval else chunk.replace("'", '"')
+            obj = parser(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            continue
+    return None
+
+
+def _humanize_chat_response(content: str) -> str:
+    text = (content or "").strip()
+    if not text:
+        return text
+    parsed = _extract_embedded_dict_from_content(text)
+    if not parsed:
+        return text
+
+    labels = {
+        "texto": "Descripción",
+        "comunicacion": "Comunicación que facilita",
+        "valor": "Valor ($)",
+    }
+    lines: List[str] = []
+    for key in ("texto", "comunicacion", "valor"):
+        if key not in parsed or parsed[key] in (None, ""):
+            continue
+        val = parsed[key]
+        if key == "valor":
+            try:
+                val = f"${float(val):,.0f}".replace(",", ".")
+            except (TypeError, ValueError):
+                val = str(val)
+        lines.append(f"- **{labels[key]}:** {val}")
+    if not lines:
+        return text
+
+    start = text.find("{")
+    end = text.rfind("}")
+    before = text[:start].strip()
+    after = text[end + 1 :].strip()
+    body = "\n".join(lines)
+    parts = [part for part in (before, body, after) if part]
+    return "\n\n".join(parts)
+
+
 def _resolve_guided_confirmation_target(
     history: List[dict],
     merged_before: dict,
@@ -1008,10 +1357,32 @@ def _resolve_guided_confirmation_target(
 ) -> Optional[Union[Tuple[str, str], Tuple[str, int, str]]]:
     if not _is_affirmative_message(message):
         return target_before
+    # Mantener el paso activo del flujo guiado; el mensaje del asistente suele mencionar otros campos.
+    if target_before is not None:
+        return target_before
     inferred = _infer_confirmed_target_from_assistant(history)
     if inferred:
         return inferred
     return target_before
+
+
+def _append_guided_numeric_fallback(
+    form_updates: List[Dict[str, Any]],
+    *,
+    target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]],
+    message: str,
+) -> None:
+    if not target or target[0] != "money" or target[2] != "valor":
+        return
+    if _is_affirmative_message(message):
+        return
+    from app.roi import _parse_number
+
+    parsed = _parse_number((message or "").strip())
+    if parsed is None:
+        return
+    field_name = target[1]
+    _upsert_scalar_form_update(form_updates, field_name, {"valor": parsed})
 
 
 def _has_update_for_target(
@@ -1035,6 +1406,18 @@ def _has_update_for_target(
         return False
     if target[0] == "kpi":
         return any((update.get("function") == "UpdateKpis") for update in (form_updates or []))
+    if target[0] == "money":
+        field_name = target[1]
+        for update in form_updates or []:
+            if update.get("function") != "UpdateFormField":
+                continue
+            args = update.get("args") or {}
+            if args.get("field_name") != field_name:
+                continue
+            value = args.get("value")
+            if isinstance(value, dict) and value.get("valor") is not None:
+                return True
+        return False
     return False
 
 
@@ -1076,10 +1459,50 @@ def _append_guided_confirmation_fallback(
         )
         return
 
+    if target[0] == "money":
+        field_name, sub = target[1], target[2]
+        assistant_content = _get_last_assistant_message(history)
+        parsed_dict = _extract_embedded_dict_from_content(assistant_content)
+        if parsed_dict and field_name == "beneficio_esperado":
+            has_data = any(
+                parsed_dict.get(key) not in (None, "")
+                for key in ("texto", "comunicacion", "valor")
+            )
+            if has_data:
+                _upsert_scalar_form_update(form_updates, field_name, parsed_dict)
+                return
+        inferred_value = _extract_proposal_for_confirmation(history, target)
+        if not inferred_value:
+            return
+        if field_name == "beneficio_esperado":
+            if sub == "valor":
+                from app.roi import _parse_number
+                parsed = _parse_number(inferred_value)
+                value = {"valor": parsed if parsed is not None else inferred_value}
+            elif sub == "comunicacion":
+                value = {"comunicacion": inferred_value}
+            else:
+                value = {"texto": inferred_value}
+        else:
+            if sub == "valor":
+                from app.roi import _parse_number
+                parsed = _parse_number(inferred_value)
+                value = {"valor": parsed if parsed is not None else inferred_value}
+            else:
+                value = {"texto": inferred_value}
+        _upsert_scalar_form_update(form_updates, field_name, value)
+        return
+
     if target[0] != "scalar" or _message_mentions_kpi_instruction(message):
         return
 
     field_name = target[1]
+    if field_name == "bibliografia":
+        urls = _collect_bibliography_urls_from_history(history)
+        if len(urls) >= 3:
+            _upsert_bibliography_update(form_updates, [{"url": url} for url in urls])
+        return
+
     inferred_value = _extract_proposal_for_confirmation(history, target)
     if not inferred_value:
         return
@@ -1351,7 +1774,7 @@ def _suggest_validation_from_form(merged: dict) -> str:
 
 
 def _suggest_qualitative_benefit_from_form(merged: dict) -> str:
-    current = money_field_text(merged.get("beneficio_esperado"))
+    current = normalize_beneficio_field(merged.get("beneficio_esperado")).get("texto")
     if current:
         return current
     return "Mejor calidad de servicio, mayor confianza en la información y decisiones más rápidas basadas en evidencia."
@@ -1390,10 +1813,46 @@ def _money_field_target(field_name: str, value: Any) -> Optional[Tuple[str, str,
     return None
 
 
+def _beneficio_field_parts(value: Any) -> Dict[str, Any]:
+    normalized = normalize_beneficio_field(value)
+    return {
+        "texto": str(normalized.get("texto") or "").strip(),
+        "comunicacion": str(normalized.get("comunicacion") or "").strip(),
+        "valor": normalized.get("valor"),
+    }
+
+
+def _merge_beneficio_field(existing: Any, incoming: Any) -> Dict[str, Any]:
+    current = _beneficio_field_parts(existing)
+    new_value = _beneficio_field_parts(incoming)
+    return {
+        "texto": new_value["texto"] or current["texto"],
+        "comunicacion": new_value["comunicacion"] or current["comunicacion"],
+        "valor": new_value["valor"] if new_value["valor"] is not None else current["valor"],
+    }
+
+
+def _beneficio_field_target(value: Any) -> Optional[Tuple[str, str, str]]:
+    parts = _beneficio_field_parts(value)
+    if not parts["texto"]:
+        return ("money", "beneficio_esperado", "texto")
+    if not parts["comunicacion"]:
+        return ("money", "beneficio_esperado", "comunicacion")
+    if parts["valor"] is None:
+        return ("money", "beneficio_esperado", "valor")
+    return None
+
+
 def _guided_specific_proposal(
     target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]], merged: dict
 ) -> Optional[str]:
-    if not target or target[0] != "scalar":
+    if not target:
+        return None
+    if target[0] == "scalar":
+        key = target[1]
+        if not _is_empty_field(key, merged.get(key)):
+            return None
+    if target[0] != "scalar":
         return None
     key = target[1]
     if key == "titulo":
@@ -1697,6 +2156,134 @@ Idea del usuario:
 
 
 _MAX_KPI_ROWS = 10
+_URL_PATTERN = re.compile(r"https?://[^\s\)\]>\'\"<,]+", re.IGNORECASE)
+
+
+def _extract_urls_from_text(text: str) -> List[str]:
+    urls: List[str] = []
+    seen: set = set()
+    for match in _URL_PATTERN.findall(text or ""):
+        url = match.rstrip(".,;:)")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _valid_bibliography_urls(items: Any) -> List[str]:
+    valid: List[str] = []
+    for item in items or []:
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or item.get("href") or item.get("link") or "").strip()
+        else:
+            continue
+        if not url:
+            continue
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                valid.append(url)
+        except Exception:
+            continue
+    return valid
+
+
+def _bibliography_needs_fill(merged: dict) -> bool:
+    return len(_valid_bibliography_urls(merged.get("bibliografia"))) < 3
+
+
+def _collect_bibliography_urls_from_history(history: List[dict]) -> List[str]:
+    urls: List[str] = []
+    seen: set = set()
+    for msg in reversed(history or []):
+        if msg.get("role") != "agent":
+            continue
+        for url in _extract_urls_from_text(str(msg.get("content") or "")):
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _normalize_bibliography_items(items: List[dict]) -> List[dict]:
+    rows: List[dict] = []
+    for item in items or []:
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+        else:
+            continue
+        if url:
+            uso = ""
+            if isinstance(item, dict):
+                uso = str(item.get("uso") or item.get("proposito") or "").strip()
+            rows.append({"url": url, "uso": uso})
+    while len(rows) < 3:
+        rows.append({"url": "", "uso": ""})
+    return rows[:10]
+
+
+def _upsert_bibliography_update(
+    form_updates: List[Dict[str, Any]],
+    items: List[dict],
+) -> None:
+    kept = [
+        update
+        for update in form_updates
+        if (update.get("function") or update.get("name")) != "UpdateBibliography"
+    ]
+    form_updates[:] = kept
+    form_updates.append(
+        {
+            "function": "UpdateBibliography",
+            "args": {"items": _normalize_bibliography_items(items)},
+        }
+    )
+
+
+def _is_bibliography_add_request(message: str) -> bool:
+    normalized = _normalize_text_for_match(message)
+    if not normalized:
+        return False
+    markers = (
+        "agregala",
+        "agregalas",
+        "agreguelas",
+        "añadelas",
+        "anadelas",
+        "ponlas",
+        "incluyelas",
+        "incorporalas",
+        "guardalas",
+        "usalas",
+        "colocalas",
+        "agrega esas",
+        "agrega las",
+        "pon esas",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _append_bibliography_confirmation_fallback(
+    form_updates: List[Dict[str, Any]],
+    *,
+    history: List[dict],
+    message: str,
+) -> bool:
+    should_apply = _is_bibliography_add_request(message) or (
+        _is_affirmative_message(message)
+        and _content_mentions_scalar_field(_get_last_assistant_message(history), "bibliografia")
+    )
+    if not should_apply:
+        return False
+    urls = _collect_bibliography_urls_from_history(history)
+    if len(urls) < 3:
+        return False
+    _upsert_bibliography_update(form_updates, [{"url": url} for url in urls])
+    return True
 
 _KPI_INSTRUCTION_MARKERS = (
     "kpi",
@@ -1761,10 +2348,7 @@ def _sanitize_kpi_list(rows: List[dict]) -> List[dict]:
     normalized = [_normalize_kpi_row(row) for row in (rows or [])]
     non_empty = [row for row in normalized if not _is_kpi_row_empty(row)]
     if non_empty:
-        result = non_empty[:_MAX_KPI_ROWS]
-        if len(result) < _MAX_KPI_ROWS:
-            result.append({"indicador": "", "base": "", "meta": ""})
-        return result
+        return non_empty[:_MAX_KPI_ROWS]
     return [{"indicador": "", "base": "", "meta": ""}]
 
 
@@ -1890,6 +2474,9 @@ def _filter_guided_form_updates(
             raw_items = args.get("items") if args.get("items") is not None else args.get("kpis")
             if raw_items:
                 args["items"] = _merge_kpi_items(merged_before.get("kpis") or [], raw_items)
+        elif name == "UpdateBibliography":
+            if write_target[0] == "scalar" and write_target[1] != "bibliografia":
+                continue
         filtered.append(update)
     return filtered
 
@@ -1907,7 +2494,9 @@ def _apply_form_updates(
             field_name = args.get("field_name")
             val = args.get("value")
             if field_name and field_name in _GUIDED_SCALAR_ORDER and field_name != "kpis":
-                if field_name in {"beneficio_esperado", "valor_estimado"}:
+                if field_name == "beneficio_esperado":
+                    val = _merge_beneficio_field(base.get(field_name), val)
+                elif field_name == "valor_estimado":
                     val = _merge_money_field(base.get(field_name), val)
                 base[field_name] = val
         elif name == "UpdateKpis":
@@ -1915,13 +2504,21 @@ def _apply_form_updates(
             if not raw_items:
                 continue
             base["kpis"] = _merge_kpi_items(base.get("kpis") or [], raw_items)
+        elif name == "UpdateBibliography":
+            raw_items = args.get("items") or []
+            base["bibliografia"] = _normalize_bibliography_items(raw_items)
     base["kpis"] = _sanitize_kpi_list(base.get("kpis") or [])
     return base
 
 
 def _next_guided_target(merged: dict) -> Optional[Union[Tuple[str, str], Tuple[str, int, str]]]:
     for key in _GUIDED_SCALAR_ORDER:
-        if key in {"valor_estimado", "beneficio_esperado"}:
+        if key == "beneficio_esperado":
+            beneficio_target = _beneficio_field_target(merged.get(key))
+            if beneficio_target:
+                return beneficio_target
+            continue
+        if key == "valor_estimado":
             money_target = _money_field_target(key, merged.get(key))
             if money_target:
                 return money_target
@@ -1941,14 +2538,16 @@ def _next_guided_target(merged: dict) -> Optional[Union[Tuple[str, str], Tuple[s
         for sub in ("indicador", "base", "meta"):
             if _is_empty_field(sub, row.get(sub)):
                 return ("kpi", index, sub)
+    if _bibliography_needs_fill(merged):
+        return ("scalar", "bibliografia")
     return None
 
 
 def _guided_question(target: Optional[Union[Tuple[str, str], Tuple[str, int, str]]]) -> str:
     if target is None:
         return (
-            "Con esto tenemos un borrador completo. Revisa el formulario a la izquierda; "
-            "si quieres, dime qué ajustar o si añadimos otro indicador (KPI)."
+            "Con esto tenemos un borrador completo con bibliografía incluida. "
+            "Revisa el formulario a la izquierda; si quieres, dime qué ajustar."
         )
     kind = target[0]
     if kind == "scalar":
@@ -1965,6 +2564,11 @@ def _guided_question(target: Optional[Union[Tuple[str, str], Tuple[str, int, str
             "validacion_exito": "Te propongo cómo validar el éxito; dime si esa medición te sirve.",
             "beneficio_esperado": "Dime el beneficio esperado y un valor monetario estimado para usarlo en el ROI.",
             "valor_estimado": "Dime el costo estimado de implementar la iniciativa; si no tienes cifra, te ayudo a estimarlo.",
+            "bibliografia": (
+                "Para sustentar la iniciativa necesitamos al menos 3 fuentes confiables. "
+                "Te propongo algunas URLs con su uso; dime si las agregamos al formulario "
+                "o si prefieres otras."
+            ),
         }
         return q.get(
             key,
@@ -1982,8 +2586,13 @@ def _guided_question(target: Optional[Union[Tuple[str, str], Tuple[str, int, str
         if field_name == "beneficio_esperado":
             if sub == "texto":
                 return (
-                    "Ahora definamos el beneficio esperado. Describe el valor que generará "
-                    "la iniciativa para la operación o el negocio."
+                    "Describe el beneficio esperado: qué valor generará la iniciativa "
+                    "para la operación o el negocio."
+                )
+            if sub == "comunicacion":
+                return (
+                    "¿Qué comunicación facilita entre equipos o áreas y cómo "
+                    "(reportes, alertas, dashboards, notificaciones...)?"
                 )
             return "Indícame el valor monetario estimado del beneficio en dólares. Ejemplo: 20400."
     if kind != "kpi":
@@ -2045,7 +2654,7 @@ def chat_with_agent(
     from langchain.schema import SystemMessage, HumanMessage, AIMessage
 
     # Bind tools to LLM
-    tools = [UpdateFormField, UpdateKpis]
+    tools = [UpdateFormField, UpdateKpis, UpdateBibliography]
     llm_with_tools = llm.bind_tools(tools)
 
     # 1. Obtener contexto estratégico (RAG)
@@ -2058,7 +2667,7 @@ def chat_with_agent(
             snap = {k: v for k, v in current_form.items() if k in (
                 "titulo", "unidad", "problema_oportunidad", "resultado_esperado", "mvp",
                 "datos_necesarios", "datos_ubicacion", "impacto_operacion", "validacion_exito",
-                "kpis", "beneficio_esperado", "valor_estimado",
+                "kpis", "beneficio_esperado", "valor_estimado", "bibliografia",
             )}
             form_snapshot = "\n\nESTADO ACTUAL DEL FORMULARIO (JSON, úsalo para no perder datos al actualizar KPIs u otros campos):\n" + json.dumps(
                 snap, ensure_ascii=False, indent=2
@@ -2088,10 +2697,12 @@ MODO GUIADO (activo en esta petición):
 - Para datos necesarios, pregunta en lenguaje simple: qué información usa hoy el equipo, dónde vive (Excel, sistema, correos, PDFs, reportes) y quién la tiene.
 - Explica validación como: "cómo sabremos que la iniciativa funcionó".
 - Después de validación, pide primero el costo estimado en dos pasos: 1) qué incluye el costo, 2) monto del costo estimado.
-- Luego pide el beneficio esperado en dos pasos: 1) descripción del beneficio, 2) valor monetario estimado del beneficio.
-- Para beneficio esperado, guarda un objeto con texto y valor monetario estimado: {'texto': 'beneficio cualitativo/contexto', 'valor': numero}. Si solo tienes texto o solo monto, conserva lo anterior y completa la parte faltante.
-- Para valor_estimado, interpreta y guarda el costo estimado de implementar la iniciativa como {'texto': 'supuestos/costo', 'valor': numero}; no lo uses como beneficio. Si solo tienes texto o solo monto, conserva lo anterior y completa la parte faltante.
+- Luego pide el beneficio esperado en tres pasos: 1) descripción del beneficio, 2) comunicación que facilita, 3) valor monetario estimado.
+- Para beneficio_esperado, guarda internamente {'texto': 'beneficio cualitativo', 'comunicacion': '...', 'valor': numero}. Si solo tienes parte de la información, conserva lo anterior y completa la parte faltante. Nunca muestres JSON ni diccionarios crudos al usuario; describe los datos en lenguaje natural con viñetas.
+- Para valor_estimado, interpreta y guarda el costo estimado de implementar la iniciativa como {'texto': 'supuestos/costo', 'valor': numero}; no lo uses como beneficio. Si solo tienes texto o solo monto, conserva lo anterior y completa la parte faltante. Nunca muestres JSON ni diccionarios crudos al usuario.
 - Convierte beneficios vagos en KPIs sugeridos con indicador, línea base y meta.
+- Tras completar los KPIs, solicita bibliografía: propone al menos 3 URLs confiables con su uso (`uso`) y, si el usuario confirma, usa **UpdateBibliography** con items [{url: 'https://...', uso: '...'}, ...].
+- Si el usuario dice "agréguelas", "agregalas" o confirma las URLs propuestas, guarda esas URLs con UpdateBibliography; no digas que actualizaste si no llamaste la herramienta.
 - Si el usuario no sabe el costo estimado, ayuda a estimarlo con horas, personas involucradas, integraciones, infraestructura o soporte. Si no alcanza, propón dejarlo como estimación preliminar editable.
 """
     ) if guided_mode else ""
@@ -2109,9 +2720,10 @@ REGLAS DE ASESORÍA:
 2. Cita el plan: Si usas información de la base de conocimientos, menciona algo como "Según el plan estratégico..." o "El modelo de entrada sugiere...".
 3. Relleno proactivo: Cada vez que el usuario proporcione información relevante para un campo de texto, usa 'UpdateFormField' con el field_name y value correctos. Reformula la respuesta en lenguaje profesional de negocio antes de guardarla.
 3.1. Para 'valor_estimado', devuelve {{'texto': '...', 'valor': numero}}; este campo representa costo estimado de implementación, no beneficio. Si el usuario solo da el monto, devuelve el valor numérico en 'valor' y no inventes otro texto.
-3.2. Para 'beneficio_esperado', devuelve {{'texto': '...', 'valor': numero}} cuando puedas estimar un beneficio monetario. Si el usuario solo da el monto, devuelve el valor numérico en 'valor' y no inventes otro texto.
+3.2. Para 'beneficio_esperado', devuelve {{'texto': '...', 'comunicacion': '...', 'valor': numero}} cuando puedas estimar un beneficio monetario. Si el usuario solo da el monto, devuelve el valor numérico en 'valor'.
 4. **KPIs (indicadores)**: No uses UpdateFormField para los KPIs. Usa la herramienta **'UpdateKpis'** con el array **'items'**: cada elemento debe incluir **indicador**, **base** y **meta** (strings). Si el usuario pide completar base o meta de un KPI existente, **actualiza esa fila** en el array; no crees filas nuevas vacías. Si añade otro KPI, conserva los anteriores con sus datos y agrega solo la fila nueva.
 5. Si el usuario menciona varios KPIs en un mensaje, consolídalos en un solo UpdateKpis.
+5.1. Para bibliografía, usa **UpdateBibliography** con items [{url: 'https://...', uso: 'para qué sirve'}, ...]. Nunca uses UpdateFormField para bibliografia. Si propones URLs en el chat y el usuario confirma, debes llamar UpdateBibliography con esas URLs y un uso breve por fuente.
 6. No copies al formulario instrucciones meta del chat (por ejemplo "agrega la base", "pon otro KPI") ni el texto literal del usuario si está corrigiendo o conversando; interpreta la intención, reformula y actualiza el campo correcto.
 7. Si estás en modo guiado y el formulario aún está vacío, trata el primer mensaje del usuario como la idea inicial; no le pidas un título antes de entender esa idea.
 
@@ -2225,6 +2837,17 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             target=confirmation_target,
             message=message,
         )
+        _append_guided_numeric_fallback(
+            form_updates,
+            target=target_before,
+            message=message,
+        )
+
+    _append_bibliography_confirmation_fallback(
+        form_updates,
+        history=history,
+        message=message,
+    )
 
     # Si el usuario menciona explícitamente el origen SQL/BD, guarda también ubicación de datos
     # aunque el modelo no lo haya hecho en este turno.
@@ -2253,7 +2876,10 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             continue
         args = update.get("args") or {}
         field_name = args.get("field_name")
-        if field_name in {"beneficio_esperado", "valor_estimado"}:
+        if field_name == "beneficio_esperado":
+            args["value"] = _merge_beneficio_field(money_state.get(field_name), args.get("value"))
+            money_state[field_name] = args["value"]
+        elif field_name == "valor_estimado":
             args["value"] = _merge_money_field(money_state.get(field_name), args.get("value"))
             money_state[field_name] = args["value"]
 
@@ -2295,6 +2921,12 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             "mejorar el proceso descrito, reduciendo errores, tiempos de revisión "
             "y respuestas inconsistentes."
         )
+
+    form_updates = _strip_invalid_guided_form_updates(
+        form_updates,
+        message,
+        guided_mode=guided_mode,
+    )
 
     content_out = _append_guided_followup(
         response.content or "", guided_mode, current_form, form_updates
@@ -2346,19 +2978,7 @@ CAMPOS TÉCNICOS DISPONIBLES (field_name en UpdateFormField, exactamente así):
             forced = _guided_specific_proposal(nxt_after, merged_after) or _guided_question(nxt_after)
             content_out = f"Listo, avanzamos. {forced}"
 
-    form_updates = _strip_invalid_guided_form_updates(
-        form_updates,
-        message,
-        guided_mode=guided_mode,
-    )
-    if guided_mode:
-        _append_guided_confirmation_fallback(
-            form_updates,
-            history=history,
-            merged_before=merged_before,
-            target=confirmation_target,
-            message=message,
-        )
+    content_out = _humanize_chat_response(content_out)
 
     return {
         "content": content_out,

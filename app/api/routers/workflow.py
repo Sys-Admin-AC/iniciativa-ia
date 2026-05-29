@@ -19,11 +19,14 @@ from app.api.deps import (
 )
 from app.roi import (
     build_roi_payload,
+    effective_implementation_days,
     estimate_success_probability,
     merge_persisted_roi,
+    normalize_implementation_days,
     normalize_roi_form_fields,
 )
 from app.scoring import (
+    apply_implementation_days_to_potenciadores,
     build_potenciadores_payload,
     criteria_to_explanations,
     criteria_to_scores,
@@ -182,6 +185,36 @@ def _assert_bibliography_ready(conversation: db.Conversation) -> None:
         reliability = str((source or {}).get("confiabilidad") or "").lower()
         if "baja" in reliability or reliability == "low":
             raise HTTPException(status_code=409, detail="La bibliografía incluye fuentes de confiabilidad baja.")
+
+
+def _assert_data_quality_ready(conversation: db.Conversation) -> None:
+    form_data = _json_loads(conversation.form_data, {})
+    if not isinstance(form_data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Procesa el análisis de calidad de data antes de enviar a comité.",
+        )
+    analysis = form_data.get("calidad_datos_analisis")
+    if not isinstance(analysis, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Procesa el análisis de calidad de data antes de enviar a comité.",
+        )
+    try:
+        score = int(analysis.get("puntaje_global"))
+    except (TypeError, ValueError):
+        score = None
+    if score is not None and score <= 2:
+        raise HTTPException(
+            status_code=409,
+            detail="La calidad de data y documentación es insuficiente; corrige las brechas antes de enviar.",
+        )
+    gaps = analysis.get("brechas_criticas") or []
+    if isinstance(gaps, list) and len(gaps) >= 3:
+        raise HTTPException(
+            status_code=409,
+            detail="Hay demasiadas brechas críticas en calidad de data; completa la documentación antes de enviar.",
+        )
 
 
 def _ensure_roi_for_legacy(
@@ -425,6 +458,8 @@ def _serialize_event(event: db.InitiativeTimelineEvent) -> Dict[str, Any]:
 def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
     potenciadores = _conversation_potenciadores(workflow.conversation)
     roi_detalle = _conversation_roi_details(workflow.conversation)
+    conversation = workflow.conversation
+    form_data = normalize_roi_form_fields(_json_loads(conversation.form_data, {})) if conversation else {}
     return {
         "conversation_id": workflow.conversation_id,
         "current_status": _normalized_status(workflow.current_status),
@@ -440,6 +475,9 @@ def _serialize_workflow(workflow: db.InitiativeWorkflow) -> Dict[str, Any]:
         "weighted_score": _weighted_score(potenciadores),
         "roi_detalle": roi_detalle,
         "roi": workflow.conversation.roi if workflow.conversation else None,
+        "dias_implementacion_ti": form_data.get("dias_implementacion_ti"),
+        "dias_implementacion_estimados": form_data.get("dias_implementacion_estimados"),
+        "factor_innovador_ti": form_data.get("factor_innovador_ti"),
     }
 
 
@@ -540,6 +578,7 @@ def submit_to_committee(
     workflow = _get_workflow(conversation_id, session, user_id, create=True)
     _assert_status(workflow, {STATUS_DRAFT})
     _assert_bibliography_ready(workflow.conversation)
+    _assert_data_quality_ready(workflow.conversation)
     _add_event(
         session=session,
         workflow=workflow,
@@ -611,6 +650,26 @@ def submit_technical_evaluation(
     total_score = sum(criterion.score for criterion in data.criteria)
     average_score, complexity = _calculate_complexity(total_score, len(data.criteria))
 
+    conversation = workflow.conversation
+    form_data = _json_loads(conversation.form_data, {})
+    if not isinstance(form_data, dict):
+        form_data = {}
+    if data.dias_implementacion_ti is not None:
+        form_data["dias_implementacion_ti"] = normalize_implementation_days(data.dias_implementacion_ti)
+    if data.factor_innovador_ti_score is not None or (data.factor_innovador_ti_comment or "").strip():
+        form_data["factor_innovador_ti"] = {
+            "puntaje": max(0, min(5, int(data.factor_innovador_ti_score)))
+            if data.factor_innovador_ti_score is not None
+            else None,
+            "comentario": (data.factor_innovador_ti_comment or "").strip(),
+        }
+    conversation.form_data = json.dumps(form_data, ensure_ascii=False)
+    existing_potenciadores = _conversation_potenciadores(conversation)
+    if existing_potenciadores and form_data.get("dias_implementacion_ti") is not None:
+        days = effective_implementation_days(form_data)
+        updated = apply_implementation_days_to_potenciadores(existing_potenciadores, days)
+        conversation.potenciadores = json.dumps(updated, ensure_ascii=False)
+
     evaluation = db.InitiativeTechnicalEvaluation(
         workflow_id=workflow.id,
         conversation_id=conversation_id,
@@ -631,6 +690,8 @@ def submit_technical_evaluation(
         "total_score": total_score,
         "average_score": average_score,
         "complexity": complexity,
+        "dias_implementacion_ti": form_data.get("dias_implementacion_ti"),
+        "factor_innovador_ti": form_data.get("factor_innovador_ti"),
     }
     if data.payload:
         event_payload["payload"] = data.payload
@@ -680,6 +741,7 @@ def submit_business_evaluation(
 
     actor_name = data.evaluator_name or f"Usuario {user_id}"
     current_status = _normalized_status(workflow.current_status) or workflow.current_status
+    conversation = workflow.conversation
     potenciadores = build_potenciadores_payload(
         criteria_to_scores(data.criteria),
         estado="oficial",
@@ -690,8 +752,11 @@ def submit_business_evaluation(
         actualizado_por=actor_name,
         actualizado_en=_iso(get_now()),
     )
+    form_data = _json_loads(conversation.form_data, {})
+    if isinstance(form_data, dict):
+        days = effective_implementation_days(form_data)
+        potenciadores = apply_implementation_days_to_potenciadores(potenciadores, days)
 
-    conversation = workflow.conversation
     conversation.potenciadores = json.dumps(potenciadores, ensure_ascii=False)
 
     event_payload = {

@@ -10,11 +10,26 @@ from sqlalchemy.orm import Session
 
 from app import agent_logic, db
 from app.api.deps import _ensure_conversation_owner, _require_user_id
-from app.roi import build_roi_payload, estimate_success_probability, normalize_roi_form_fields
+from app.roi import (
+    build_roi_payload,
+    estimate_implementation_days,
+    estimate_success_probability,
+    merge_persisted_analysis_fields,
+    normalize_roi_form_fields,
+)
 from app.scoring import build_potenciadores_payload, default_business_scores
 from app.schemas.initiative import ChatInput, InitiativeInput
 
 router = APIRouter(tags=["conversations"])
+
+
+def _json_loads(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
 
 
 def _build_score_suggestion(form_payload, analysis):
@@ -85,10 +100,26 @@ def analyze(
             "fuentes": [],
         }
     form_payload["bibliografia_analisis"] = bibliografia_analisis
+    try:
+        calidad_datos_analisis = agent_logic.analyze_data_quality(form_payload)
+    except Exception as e:
+        logging.error(f"Error analyzing data quality: {e}")
+        calidad_datos_analisis = agent_logic._fallback_data_quality_analysis(form_payload)
+    form_payload["calidad_datos_analisis"] = calidad_datos_analisis
+    try:
+        factor_innovador_analisis = agent_logic.analyze_innovation_factor(
+            form_payload,
+            bibliografia_analisis,
+        )
+    except Exception as e:
+        logging.error(f"Error analyzing innovation factor: {e}")
+        factor_innovador_analisis = agent_logic._fallback_innovation_analysis(form_payload)
+    form_payload["factor_innovador_analisis"] = factor_innovador_analisis
     form_payload["resumen_iniciativa"] = agent_logic.generate_initiative_summary(
         form_payload,
         bibliografia_analisis,
     )
+    form_payload["dias_implementacion_estimados"] = estimate_implementation_days(form_payload)
 
     try:
         analysis = agent_logic.analyze_initiative(form_payload)
@@ -156,6 +187,8 @@ def analyze(
                 "roi_detalle": roi_detalle,
                 "roi": roi_detalle.get("roi"),
                 "bibliografia_analisis": bibliografia_analisis,
+                "calidad_datos_analisis": calidad_datos_analisis,
+                "factor_innovador_analisis": factor_innovador_analisis,
                 "resumen_iniciativa": form_payload.get("resumen_iniciativa"),
             }
 
@@ -183,6 +216,8 @@ def analyze(
         "roi_detalle": roi_detalle,
         "roi": roi_detalle.get("roi"),
         "bibliografia_analisis": bibliografia_analisis,
+        "calidad_datos_analisis": calidad_datos_analisis,
+        "factor_innovador_analisis": factor_innovador_analisis,
         "resumen_iniciativa": form_payload.get("resumen_iniciativa"),
     }
 
@@ -218,13 +253,17 @@ def chat(
     current_form = data.current_form
     if data.current_form:
         if conv.workflow and conv.workflow.current_status != "draft":
-             raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
-        current_form = normalize_roi_form_fields(data.current_form)
+            session.rollback()
+            raise HTTPException(status_code=403, detail="No se puede editar una iniciativa en revisión.")
+        existing_form = _json_loads(conv.form_data, {})
+        if not isinstance(existing_form, dict):
+            existing_form = {}
+        current_form = normalize_roi_form_fields(
+            merge_persisted_analysis_fields(existing_form, data.current_form or {})
+        )
         conv.form_data = json.dumps(current_form, ensure_ascii=False)
         if data.current_form.get("titulo"):
             conv.initiative_title = data.current_form.get("titulo")
-
-    session.commit()
 
     try:
         response_data = agent_logic.chat_with_agent(
@@ -236,7 +275,8 @@ def chat(
         response_text = response_data["content"]
         form_updates = response_data["form_updates"]
     except Exception as e:
-        logging.error(f"Error calling OpenAI API: {e}")
+        session.rollback()
+        logging.error(f"Error calling OpenAI API: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error communicating with AI service.")
 
     agent_msg = db.Message(

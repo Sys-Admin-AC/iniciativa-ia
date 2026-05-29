@@ -1,23 +1,45 @@
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 
 SCORE_VERSION = "2026-05"
 
+_POSITIVE_WEIGHTS = {
+    "financiero": 0.25,
+    "estrategico": 0.20,
+    "cliente": 0.15,
+    "datos_ia": 0.15,
+    "time_to_value": 0.10,
+}
+_POSITIVE_WEIGHT_TOTAL = sum(_POSITIVE_WEIGHTS.values())
+
 BUSINESS_SCORE_CATEGORIES = {
     "impacto": {
-        "financiero": {"peso": 0.25, "direction": "positive"},
-        "estrategico": {"peso": 0.20, "direction": "positive"},
-        "cliente": {"peso": 0.15, "direction": "positive"},
+        "financiero": {
+            "peso": round(_POSITIVE_WEIGHTS["financiero"] / _POSITIVE_WEIGHT_TOTAL, 4),
+            "direction": "positive",
+        },
+        "estrategico": {
+            "peso": round(_POSITIVE_WEIGHTS["estrategico"] / _POSITIVE_WEIGHT_TOTAL, 4),
+            "direction": "positive",
+        },
+        "cliente": {
+            "peso": round(_POSITIVE_WEIGHTS["cliente"] / _POSITIVE_WEIGHT_TOTAL, 4),
+            "direction": "positive",
+        },
     },
     "agilidad": {
-        "datos_ia": {"peso": 0.15, "direction": "positive"},
-        "time_to_value": {"peso": 0.10, "direction": "positive"},
-    },
-    "obstaculos": {
-        "complejidad": {"peso": 0.08, "direction": "negative"},
-        "riesgo": {"peso": 0.07, "direction": "negative"},
+        "datos_ia": {
+            "peso": round(_POSITIVE_WEIGHTS["datos_ia"] / _POSITIVE_WEIGHT_TOTAL, 4),
+            "direction": "positive",
+        },
+        "time_to_value": {
+            "peso": round(_POSITIVE_WEIGHTS["time_to_value"] / _POSITIVE_WEIGHT_TOTAL, 4),
+            "direction": "positive",
+        },
     },
 }
+
+TECHNICAL_CRITERION_KEYS = ("complejidad", "riesgo")
 
 BUSINESS_CRITERION_KEYS = tuple(
     criterion
@@ -35,7 +57,7 @@ def _coerce_score(value: Any, default: int = 3) -> int:
         score = int(value)
     except (TypeError, ValueError):
         score = default
-    return max(1, min(5, score))
+    return max(0, min(5, score))
 
 
 def normalize_business_scores(scores: Mapping[str, Any]) -> Dict[str, int]:
@@ -133,4 +155,73 @@ def build_potenciadores_payload(
     payload["comentario"] = comentario or ""
     payload["actualizado_por"] = actualizado_por
     payload["actualizado_en"] = actualizado_en
+    return payload
+
+
+def time_to_value_cap_for_days(days: Optional[int]) -> Optional[int]:
+    if days is None:
+        return None
+    if days <= 90:
+        return None
+    if days <= 180:
+        return 3
+    return 2
+
+
+def apply_time_to_value_from_days(
+    score: int,
+    days: Optional[int],
+    explanation: str = "",
+) -> Tuple[int, str]:
+    cap = time_to_value_cap_for_days(days)
+    if cap is None:
+        return score, explanation
+    adjusted = min(score, cap)
+    suffix = (
+        f" Ajustado por plazo de implementación ({days} días): "
+        f"{'≤90 días sin penalización' if days <= 90 else 'máximo permitido ' + str(cap)}."
+    )
+    if adjusted < score:
+        note = f"Penalizado por plazo >90 días ({days} días).{suffix}"
+        merged = f"{explanation} {note}".strip() if explanation else note
+        return adjusted, merged
+    if days and days > 90:
+        note = f"Plazo de implementación: {days} días (tope {cap} para time_to_value)."
+        merged = f"{explanation} {note}".strip() if explanation else note
+        return adjusted, merged
+    return adjusted, explanation
+
+
+def apply_implementation_days_to_potenciadores(
+    potenciadores: Dict[str, Any],
+    days: Optional[int],
+) -> Dict[str, Any]:
+    if not isinstance(potenciadores, dict) or days is None:
+        return potenciadores
+    payload = dict(potenciadores)
+    agilidad = dict(payload.get("agilidad") or {})
+    ttv = dict(agilidad.get("time_to_value") or {})
+    current_score = _coerce_score(ttv.get("puntaje"))
+    explanation = str(ttv.get("explicacion") or "")
+    adjusted_score, adjusted_explanation = apply_time_to_value_from_days(
+        current_score,
+        days,
+        explanation,
+    )
+    if adjusted_score == current_score and adjusted_explanation == explanation:
+        return potenciadores
+    ttv["puntaje"] = adjusted_score
+    ttv["explicacion"] = adjusted_explanation
+    weight = float(ttv.get("peso") or BUSINESS_SCORE_CATEGORIES["agilidad"]["time_to_value"]["peso"])
+    contribution = round(adjusted_score * weight, 2)
+    ttv["aporte"] = contribution
+    agilidad["time_to_value"] = ttv
+    payload["agilidad"] = agilidad
+    total = 0.0
+    for category, criteria in BUSINESS_SCORE_CATEGORIES.items():
+        block = payload.get(category) or {}
+        for criterion in criteria:
+            item = block.get(criterion) or {}
+            total += float(item.get("aporte") or 0)
+    payload["score"] = round(total, 2)
     return payload

@@ -4,6 +4,8 @@ import os
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 
+import app.config  # noqa: F401 — carga variables desde .env
+
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 
 
