@@ -193,21 +193,6 @@ def _assert_data_quality_ready(conversation: db.Conversation) -> None:
             status_code=400,
             detail="Procesa el análisis de calidad de data antes de enviar a comité.",
         )
-    try:
-        score = int(analysis.get("puntaje_global"))
-    except (TypeError, ValueError):
-        score = None
-    if score is not None and score <= 2:
-        raise HTTPException(
-            status_code=409,
-            detail="La calidad de data y documentación es insuficiente; corrige las brechas antes de enviar.",
-        )
-    gaps = analysis.get("brechas_criticas") or []
-    if isinstance(gaps, list) and len(gaps) >= 3:
-        raise HTTPException(
-            status_code=409,
-            detail="Hay demasiadas brechas críticas en calidad de data; completa la documentación antes de enviar.",
-        )
 
 
 def _ensure_roi_for_legacy(
